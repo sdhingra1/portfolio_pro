@@ -1,0 +1,3150 @@
+<!--
+  Portfolio Pro v0.3 — ALLOCATION COMPLETE  (2026-05-12)
+  ────────────────────────────────────────────────────────
+  Milestone: Deep allocation analysis & look-through implemented
+
+  WHAT'S WORKING
+  ──────────────
+  Parsing:
+  • Chase CSV: individual bonds (Treasury/Agency/Muni/CD) via CUSIP fallback
+  • Schwab CSV: no duplication; Positions Total footer skipped; Cash & Cash
+    Investments row correctly classified
+  • Fidelity CSV: CORE** (FDIC sweep) → Cash; all Fidelity mutual funds classified
+  • All accounts: filename-based account naming (broker + type + label)
+
+  TDB (218 entries, 8 look-through funds):
+  • Fidelity mutual funds: FADMX, FIPDX, FTBFX, FBKFX (68/32 lt), FNBXX
+  • Vanguard mutual funds: VASGX (80/20 lt)
+  • iShares Allocation ETFs: AOK/AOM/AOR/AOA (all with look-through splits)
+  • Covered-call ETFs: JEPI/JEPQ (85% equity / 15% ELN look-through)
+  • Missing ETFs: VIOO (Small Cap), QQQE (Nasdaq Equal Weight), PGHY (Intl HY)
+  • 80+ individual stocks with GICS sector sub-classes:
+      US Technology, US Communication, US Healthcare, US Financials,
+      US Industrials, US Consumer, US Energy, US Materials, REIT
+  • International Developed ADRs: ASML, SAP, TM, TSM, HSBC, RIO, BHP, etc.
+  • CORE** → Cash Sweep; QACDS → Certificate of Deposit
+
+  classifyBondDesc():
+  • Expanded Treasury regex: catches "US TREASU NT", "UST NOTE DUE" abbreviations
+  • Muni regex: handles WTR, TRANSN, ARPTS, CNTY abbreviations
+
+  calcStats():
+  • Look-through: Mixed-fund values (FBKFX, VASGX, JEPI, JEPQ, AOx) split into
+    Stocks/Bonds/Cash proportions for accurate asset-class allocation totals
+  • No "Mixed" bucket in allocation chart — everything resolves to Stocks/Bonds/Cash
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Portfolio Pro — Financial Portfolio Analyzer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{
+  --bg:#f0f4f8;--surface:#fff;--surface2:#f8fafc;--border:#e2e8f0;
+  --text:#0f172a;--text2:#475569;--text3:#94a3b8;
+  --emerald:#10b981;--emerald-d:#059669;--emerald-l:#d1fae5;
+  --rose:#f43f5e;--rose-d:#e11d48;--rose-l:#ffe4e6;
+  --purple:#7c3aed;--purple-d:#6d28d9;--purple-l:#ede9fe;
+  --blue:#3b82f6;--blue-d:#2563eb;--blue-l:#dbeafe;
+  --amber:#f59e0b;--amber-l:#fef3c7;
+  --sky:#0ea5e9;--sky-l:#e0f2fe;
+  --r:12px;--r-sm:8px;
+  --sh:0 1px 3px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.04);
+  --sh-md:0 4px 6px rgba(0,0,0,.07),0 2px 4px rgba(0,0,0,.05);
+  --sh-lg:0 10px 25px rgba(0,0,0,.1),0 4px 10px rgba(0,0,0,.06);
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;}
+
+/* NAV */
+.nav{position:sticky;top:0;z-index:100;background:var(--surface);border-bottom:1px solid var(--border);box-shadow:var(--sh);display:flex;align-items:center;padding:0 20px;gap:2px;}
+.nav-brand{font-weight:800;font-size:17px;color:var(--blue);padding:14px 0;margin-right:20px;white-space:nowrap;letter-spacing:-.3px;}
+.nav-brand em{color:var(--text);font-style:normal;}
+.nav-tab{padding:14px 13px;cursor:pointer;color:var(--text2);font-weight:500;font-size:13px;border-bottom:3px solid transparent;margin-bottom:-1px;transition:all .15s;display:flex;align-items:center;gap:5px;white-space:nowrap;}
+.nav-tab:hover{color:var(--text);}
+.nav-tab.active{color:var(--blue);border-bottom-color:var(--blue);}
+
+/* LAYOUT */
+.content{max-width:1180px;margin:0 auto;padding:24px;}
+.tab-panel{display:none;animation:fadeIn .2s ease;}
+.tab-panel.active{display:block;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
+
+/* GRID */
+.grid{display:grid;gap:16px;}
+.g2{grid-template-columns:repeat(2,1fr);}
+.g3{grid-template-columns:repeat(3,1fr);}
+.g4{grid-template-columns:repeat(4,1fr);}
+.g12{grid-template-columns:1fr 2fr;}
+.g13{grid-template-columns:1fr 3fr;}
+.g32{grid-template-columns:3fr 2fr;}
+
+/* CARDS */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);box-shadow:var(--sh);}
+.card-hdr{padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+.card-title{font-weight:600;font-size:14px;display:flex;align-items:center;gap:6px;}
+.card-body{padding:16px 18px;}
+
+/* METRICS */
+.metric{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:18px;box-shadow:var(--sh);}
+.metric-label{font-size:11px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;}
+.metric-value{font-size:26px;font-weight:800;letter-spacing:-.8px;line-height:1;}
+.metric-sub{font-size:12px;color:var(--text3);margin-top:4px;}
+.metric-icon{font-size:20px;margin-bottom:6px;}
+
+/* BADGES */
+.badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700;}
+.badge-taxable{background:var(--amber-l);color:#92400e;}
+.badge-deferred{background:var(--purple-l);color:#5b21b6;}
+.badge-free{background:var(--sky-l);color:#075985;}
+
+/* PROGRESS */
+.pr-row{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
+.pr-label{min-width:150px;font-size:12px;color:var(--text2);flex-shrink:0;}
+.pr-track{flex:1;height:8px;background:var(--bg);border-radius:4px;overflow:hidden;}
+.pr-fill{height:100%;border-radius:4px;transition:width .5s ease;}
+.pr-pct{width:44px;text-align:right;font-size:12px;font-weight:700;}
+.pr-val{width:90px;text-align:right;font-size:11px;color:var(--text3);}
+
+/* BUTTONS */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:var(--r-sm);cursor:pointer;font-size:13px;font-weight:600;border:none;transition:all .15s;}
+.btn-primary{background:var(--blue);color:#fff;}
+.btn-primary:hover{background:var(--blue-d);}
+.btn-emerald{background:var(--emerald);color:#fff;}
+.btn-emerald:hover{background:var(--emerald-d);}
+.btn-rose{background:var(--rose);color:#fff;}
+.btn-rose:hover{background:var(--rose-d);}
+.btn-ghost{background:transparent;color:var(--text2);border:1px solid var(--border);}
+.btn-ghost:hover{background:var(--surface2);}
+.btn-sm{padding:5px 10px;font-size:12px;}
+
+/* UPLOAD ZONE */
+.upload-zone{border:2px dashed var(--border);border-radius:var(--r);padding:40px 24px;text-align:center;cursor:pointer;transition:all .2s;background:var(--surface);}
+.upload-zone:hover,.upload-zone.drag-over{border-color:var(--blue);background:var(--blue-l);}
+.upload-icon{font-size:40px;margin-bottom:10px;}
+.upload-title{font-size:15px;font-weight:700;margin-bottom:5px;}
+.upload-sub{font-size:12px;color:var(--text2);}
+input[type=file]{display:none;}
+
+/* PROCESSING STATUS */
+.proc-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);margin-bottom:16px;overflow:hidden;}
+.proc-hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:var(--blue-l);border-bottom:1px solid #93c5fd;}
+.proc-title{font-weight:700;font-size:13px;color:var(--blue-d);}
+.proc-item{display:flex;align-items:center;justify-content:space-between;padding:9px 16px;border-bottom:1px solid var(--border);font-size:13px;}
+.proc-item:last-child{border-bottom:none;}
+.proc-status{width:18px;height:18px;flex-shrink:0;display:flex;align-items:center;justify-content:center;}
+.proc-filename{flex:1;margin:0 10px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.proc-result{font-size:12px;color:var(--text3);white-space:nowrap;}
+.spin{width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+
+/* ACCOUNT CARDS */
+.acct-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);margin-bottom:10px;overflow:hidden;box-shadow:var(--sh);}
+.acct-hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 15px;background:var(--surface2);border-bottom:1px solid var(--border);}
+.acct-name{font-weight:700;font-size:14px;}
+.acct-positions{display:none;}
+.acct-positions.open{display:block;}
+
+/* TABLE */
+.tbl{width:100%;border-collapse:collapse;}
+.tbl th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);font-weight:700;padding:7px 12px;text-align:left;border-bottom:1px solid var(--border);}
+.tbl td{padding:8px 12px;border-bottom:1px solid var(--border);font-size:13px;vertical-align:middle;}
+.tbl tr:last-child td{border-bottom:none;}
+.tbl tbody tr:hover td{background:var(--surface2);}
+.tr{text-align:right;}
+
+/* INPUTS */
+.form-group{margin-bottom:13px;}
+.form-label{font-size:12px;font-weight:600;color:var(--text2);margin-bottom:5px;display:block;}
+.input{width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:var(--r-sm);font-size:14px;color:var(--text);background:var(--surface);outline:none;transition:border-color .15s;}
+.input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(59,130,246,.1);}
+select.input{cursor:pointer;}
+
+/* TOGGLE */
+.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border);}
+.toggle-row:last-child{border-bottom:none;}
+.toggle-label{font-size:13px;font-weight:600;}
+.toggle-sub{font-size:11px;color:var(--text3);}
+.toggle{position:relative;width:36px;height:20px;background:var(--border);border-radius:10px;cursor:pointer;transition:background .2s;flex-shrink:0;}
+.toggle.on{background:var(--blue);}
+.toggle::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2);transition:transform .2s;}
+.toggle.on::after{transform:translateX(16px);}
+
+/* TRADE ITEMS */
+.trade-item{display:flex;align-items:center;justify-content:space-between;padding:9px 13px;border-radius:var(--r-sm);margin-bottom:7px;border-left:3px solid transparent;}
+.trade-sell{background:var(--rose-l);border-color:var(--rose);}
+.trade-buy{background:var(--emerald-l);border-color:var(--emerald);}
+.trade-convert{background:var(--purple-l);border-color:var(--purple);}
+.trade-deposit{background:var(--amber-l);border-color:var(--amber);}
+
+/* ALERTS */
+.alert{padding:11px 15px;border-radius:var(--r-sm);font-size:13px;display:flex;gap:9px;margin-bottom:10px;line-height:1.5;}
+.alert-warning{background:var(--amber-l);color:#78350f;border:1px solid #fcd34d;}
+.alert-info{background:var(--blue-l);color:#1e3a5f;border:1px solid #93c5fd;}
+.alert-success{background:var(--emerald-l);color:#064e3b;border:1px solid #6ee7b7;}
+.alert-danger{background:var(--rose-l);color:#881337;border:1px solid #fda4af;}
+
+/* LOCK SCREEN */
+.lockscreen{position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;align-items:center;justify-content:center;}
+.lockscreen-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:44px 40px;width:400px;max-width:92vw;box-shadow:var(--sh-lg);text-align:center;}
+.lockscreen-icon{font-size:52px;margin-bottom:16px;}
+.lockscreen-title{font-size:22px;font-weight:800;margin-bottom:8px;}
+.lockscreen-sub{font-size:13px;color:var(--text2);line-height:1.6;margin-bottom:24px;}
+.pin-input{font-size:20px;letter-spacing:6px;text-align:center;font-family:monospace;padding:14px;}
+.pin-error{color:var(--rose);font-size:12px;margin-top:8px;min-height:18px;font-weight:600;}
+.session-meta{font-size:11px;color:var(--text3);margin-top:14px;}
+/* NAV SESSION CONTROLS */
+.nav-session{margin-left:auto;display:flex;align-items:center;gap:6px;padding-left:12px;flex-shrink:0;}
+.nsb{display:flex;align-items:center;gap:4px;padding:5px 10px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--surface);cursor:pointer;font-size:12px;font-weight:600;color:var(--text2);transition:all .15s;white-space:nowrap;}
+.nsb:hover{border-color:var(--blue);color:var(--blue);}
+.nsb.lock:hover{border-color:var(--amber);color:var(--amber);}
+.nsb.saved{border-color:var(--emerald);color:var(--emerald-d);}
+.nsb.unsaved{border-color:var(--amber);color:var(--amber);}
+.session-dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex-shrink:0;}
+
+/* CREATOR NAV BADGE */
+.nav-creator{display:flex;align-items:center;gap:8px;padding:0 14px;border-left:1px solid var(--border);flex-shrink:0;}
+.nav-creator-img,.nav-creator-init{width:30px;height:30px;border-radius:50%;border:1.5px solid #c8912a;display:block;flex-shrink:0;}
+.nav-creator-img{object-fit:cover;object-position:top center;background:var(--surface);}
+.nav-creator-init{background:#1e3a5c;display:none;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#f5d98a;}
+.nav-creator-name{font-size:11.5px;font-weight:600;color:var(--text2);white-space:nowrap;letter-spacing:-.01em;}
+
+/* RATIONALE */
+.rationale{background:var(--surface2);border-radius:var(--r);padding:15px 17px;font-size:13px;line-height:1.7;color:var(--text2);}
+.rationale p{margin-bottom:9px;}
+.rationale p:last-child{margin-bottom:0;}
+.rationale strong{color:var(--text);}
+
+/* MODAL */
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:500;display:flex;align-items:center;justify-content:center;padding:20px;}
+.modal-box{background:var(--surface);border-radius:var(--r);box-shadow:var(--sh-lg);width:540px;max-width:100%;max-height:90vh;overflow-y:auto;}
+.modal-hdr{padding:16px 20px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+.modal-title{font-size:15px;font-weight:700;}
+.modal-body{padding:18px 20px;}
+.modal-ftr{padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:space-between;align-items:center;}
+.modal-progress{font-size:12px;color:var(--text3);}
+
+/* REVIEW PREVIEW */
+.rv-preview{background:var(--surface2);border-radius:var(--r-sm);overflow:hidden;margin-top:14px;}
+.rv-preview-hdr{padding:8px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);border-bottom:1px solid var(--border);}
+.rv-row{display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--border);font-size:12px;}
+.rv-row:last-child{border-bottom:none;}
+.rv-sym{font-weight:700;width:60px;flex-shrink:0;}
+.rv-desc{flex:1;color:var(--text2);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
+.rv-val{font-weight:700;text-align:right;white-space:nowrap;}
+.rv-yield{width:45px;text-align:right;color:var(--text3);font-size:11px;}
+
+/* CHIP */
+.chip{display:inline-block;padding:1px 6px;border-radius:20px;font-size:11px;font-weight:700;}
+.chip-Stocks{background:var(--blue-l);color:#1e40af;}
+.chip-Bonds{background:var(--purple-l);color:#5b21b6;}
+.chip-Cash{background:var(--emerald-l);color:#065f46;}
+.chip-Mixed{background:var(--amber-l);color:#92400e;}
+
+/* DONUT */
+.donut-wrap{display:flex;align-items:center;gap:24px;padding:4px 0;}
+.donut-canvas-wrap{position:relative;width:160px;height:160px;flex-shrink:0;}
+.donut-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;}
+.donut-center-val{font-size:17px;font-weight:800;letter-spacing:-.5px;}
+.donut-center-label{font-size:11px;color:var(--text3);}
+.donut-legend{flex:1;display:flex;flex-direction:column;gap:8px;}
+.legend-item{display:flex;align-items:center;justify-content:space-between;gap:6px;}
+.legend-left{display:flex;align-items:center;gap:7px;font-size:13px;}
+.legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;}
+
+/* SECTION HEADER */
+.sec-hdr{margin-bottom:18px;}
+.sec-title{font-size:20px;font-weight:700;letter-spacing:-.4px;}
+.sec-sub{font-size:13px;color:var(--text2);margin-top:2px;}
+
+/* EMPTY STATE */
+.empty{text-align:center;padding:60px 24px;color:var(--text3);}
+.empty-icon{font-size:50px;margin-bottom:12px;}
+.empty-title{font-size:16px;font-weight:700;color:var(--text2);margin-bottom:6px;}
+.empty-sub{font-size:13px;}
+
+/* DIVIDER */
+hr.dv{border:none;border-top:1px solid var(--border);margin:13px 0;}
+
+/* TOAST */
+.toast-wrap{position:fixed;bottom:22px;right:22px;z-index:1000;display:flex;flex-direction:column;gap:7px;}
+.toast{background:var(--text);color:#fff;padding:10px 15px;border-radius:var(--r-sm);font-size:13px;font-weight:500;box-shadow:var(--sh-lg);animation:slideUp .25s ease;max-width:300px;}
+.toast.ok{background:var(--emerald-d);}
+.toast.err{background:var(--rose-d);}
+@keyframes slideUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:none;}}
+
+/* INPUT SUFFIX */
+.inp-sfx{position:relative;}
+.inp-sfx .input{padding-right:26px;}
+.inp-sfx-lbl{position:absolute;right:9px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:13px;pointer-events:none;}
+
+@media(max-width:768px){
+  .g2,.g3,.g4,.g12,.g13,.g32{grid-template-columns:1fr;}
+  .nav{overflow-x:auto;padding:0 10px;}
+  .content{padding:12px;}
+}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-brand">💼 Portfolio<em>Pro</em></div>
+  <div class="nav-tab active" id="ntab-ingestion" onclick="switchTab('ingestion')">📂 Investment Accounts</div>
+  <div class="nav-tab" id="ntab-allocation" onclick="switchTab('allocation')">📊 Current Asset Allocation</div>
+  <div class="nav-tab" id="ntab-income" onclick="switchTab('income')">💵 Current Income</div>
+  <div class="nav-tab" id="ntab-optimizer" onclick="switchTab('optimizer')">⚖️ Target Allocation Planning</div>
+  <div class="nav-tab" id="ntab-planner" onclick="switchTab('planner')">🎯 Target Income Planning</div>
+  <div class="nav-creator">
+    <img class="nav-creator-img" src="sandeep.png" alt="Sandeep Dhingra"
+         onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+    <div class="nav-creator-init">SD</div>
+    <span class="nav-creator-name">Sandeep Dhingra</span>
+  </div>
+  <div class="nav-session" id="nav-session" style="display:none">
+    <div class="nsb saved" id="nsb-status" title="Session encryption status"><div class="session-dot"></div><span id="nsb-label">Saved</span></div>
+    <button class="nsb" onclick="exportBackup()" title="Download encrypted backup file">💾 Backup</button>
+    <button class="nsb" onclick="importBackupPrompt()" title="Restore from backup file">📂 Restore</button>
+    <button class="nsb lock" onclick="lockSession()" title="Lock session and clear data from memory">🔒 Lock</button>
+  </div>
+</nav>
+
+<!-- LOCK SCREEN -->
+<div class="lockscreen" id="lockscreen" style="display:none">
+  <div class="lockscreen-card">
+    <div class="lockscreen-icon">🔐</div>
+    <div class="lockscreen-title">Portfolio Locked</div>
+    <div class="lockscreen-sub" id="lock-sub">Your portfolio data is encrypted and stored locally.<br>Enter your PIN to continue.</div>
+    <input class="input pin-input" id="lock-pin" type="password" maxlength="32" placeholder="PIN" autocomplete="current-password"
+      onkeydown="if(event.key==='Enter')unlockSession()">
+    <div class="pin-error" id="lock-error"></div>
+    <button class="btn btn-primary" style="width:100%;margin-top:16px;padding:12px" onclick="unlockSession()">🔓 Unlock</button>
+    <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);display:flex;justify-content:center;gap:16px">
+      <button class="btn" style="font-size:12px;color:var(--text3)" onclick="importBackupPrompt()">📂 Restore Backup</button>
+      <button class="btn" style="font-size:12px;color:var(--rose)" onclick="clearSessionConfirm()">🗑️ Clear & Start Fresh</button>
+    </div>
+    <div class="session-meta" id="lock-meta"></div>
+  </div>
+</div>
+<input type="file" id="backup-file-input" accept=".json" style="display:none" onchange="importBackupFile(event)">
+
+<!-- PIN SETUP MODAL -->
+<div class="modal-bg" id="pin-setup-bg" style="display:none">
+  <div class="modal-box" style="max-width:420px">
+    <div class="modal-hdr">
+      <div class="modal-title">🔒 Protect Your Session</div>
+      <button class="modal-close" onclick="skipPinSetup()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="alert alert-info" style="margin-bottom:16px">
+        Set a PIN to encrypt your portfolio data in the browser. Data stays <strong>on your device only</strong> — never sent anywhere. Without the PIN, the stored data is cryptographically unreadable.
+      </div>
+      <div class="form-group">
+        <label class="form-label">Create PIN <span style="color:var(--text3);font-weight:400">(minimum 4 characters)</span></label>
+        <input class="input pin-input" id="setup-pin" type="password" maxlength="32" placeholder="New PIN" autocomplete="new-password">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Confirm PIN</label>
+        <input class="input pin-input" id="setup-pin2" type="password" maxlength="32" placeholder="Repeat PIN" autocomplete="new-password"
+          onkeydown="if(event.key==='Enter')savePinSetup()">
+      </div>
+      <div class="pin-error" id="setup-error"></div>
+    </div>
+    <div class="modal-ftr">
+      <button class="btn" style="color:var(--text3)" onclick="skipPinSetup()">Skip — data won't persist</button>
+      <button class="btn btn-primary" onclick="savePinSetup()">🔒 Encrypt & Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- CHANGE PIN MODAL -->
+<div class="modal-bg" id="change-pin-bg" style="display:none">
+  <div class="modal-box" style="max-width:420px">
+    <div class="modal-hdr">
+      <div class="modal-title">🔑 Change PIN</div>
+      <button class="modal-close" onclick="document.getElementById('change-pin-bg').style.display='none'">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Current PIN</label>
+        <input class="input pin-input" id="chg-old" type="password" maxlength="32" placeholder="Current PIN">
+      </div>
+      <div class="form-group">
+        <label class="form-label">New PIN</label>
+        <input class="input pin-input" id="chg-new" type="password" maxlength="32" placeholder="New PIN">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Confirm New PIN</label>
+        <input class="input pin-input" id="chg-new2" type="password" maxlength="32" placeholder="Repeat New PIN"
+          onkeydown="if(event.key==='Enter')confirmChangePIN()">
+      </div>
+      <div class="pin-error" id="chg-error"></div>
+    </div>
+    <div class="modal-ftr">
+      <button class="btn" onclick="document.getElementById('change-pin-bg').style.display='none'">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmChangePIN()">🔑 Update PIN</button>
+    </div>
+  </div>
+</div>
+
+<div class="content">
+
+  <!-- TAB 1 -->
+  <div class="tab-panel active" id="panel-ingestion">
+    <div class="sec-hdr">
+      <div class="sec-title">Accounts Manager</div>
+      <div class="sec-sub">Upload files or scan a folder — CSV, Excel, and PDF supported. All data stays on your device.</div>
+    </div>
+
+    <div class="grid g12" style="margin-bottom:18px;">
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <div class="upload-zone" id="upload-zone"
+          onclick="document.getElementById('fi-files').click()"
+          ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
+          <div class="upload-icon">📁</div>
+          <div class="upload-title">Drop files or click to browse</div>
+          <div class="upload-sub">CSV · Excel (.xlsx) · PDF — any combination</div>
+        </div>
+        <button class="btn btn-ghost" style="width:100%;justify-content:center;" onclick="document.getElementById('fi-folder').click()">
+          🗂️ Scan a Folder (recursive)
+        </button>
+        <input type="file" id="fi-files" multiple accept=".csv,.xlsx,.xls,.pdf" onchange="handleFiles(event)">
+        <input type="file" id="fi-folder" multiple webkitdirectory accept=".csv,.xlsx,.xls,.pdf" onchange="handleFiles(event)">
+      </div>
+      <div class="card" style="height:fit-content;">
+        <div class="card-hdr"><div class="card-title">🔍 What Gets Detected</div></div>
+        <div class="card-body" style="font-size:12px;line-height:1.9;color:var(--text2);">
+          <strong>From filename:</strong> Roth/HSA → Tax-Free · 401k/IRA → Tax-Deferred<br>
+          <strong>From content:</strong> Brokerage name, account type, tax treatment<br>
+          <strong>CSV/XLSX:</strong> Symbol, description, value, yield from any column layout<br>
+          <strong>PDF:</strong> Individual holdings (tickers), ending balance, savings/CD/checking balances<br>
+          <strong>After parsing:</strong> You confirm or edit name &amp; tax treatment per file
+        </div>
+      </div>
+    </div>
+
+    <div id="proc-status" style="display:none;"></div>
+    <div id="accounts-list"></div>
+    <div id="empty-accounts">
+      <div class="empty">
+        <div class="empty-icon">🗂️</div>
+        <div class="empty-title">No accounts yet</div>
+        <div class="empty-sub">Upload files or scan a folder above</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB 2 -->
+  <div class="tab-panel" id="panel-allocation">
+    <div class="sec-hdr"><div class="sec-title">Asset Allocation Dashboard</div><div class="sec-sub">Macro and micro view of your portfolio composition</div></div>
+    <div id="allocation-content"></div>
+  </div>
+
+  <!-- TAB 3 -->
+  <div class="tab-panel" id="panel-income">
+    <div class="sec-hdr"><div class="sec-title">Income &amp; Tax Dashboard</div><div class="sec-sub">Projected annual income segmented by IRS tax treatment</div></div>
+    <div id="income-content"></div>
+  </div>
+
+  <!-- TAB 4 -->
+  <div class="tab-panel" id="panel-optimizer">
+    <div class="sec-hdr"><div class="sec-title">Target Allocation Optimizer</div><div class="sec-sub">Generate a tax-efficient trade plan to reach your target allocation</div></div>
+    <div id="optimizer-content"></div>
+  </div>
+
+  <!-- TAB 5 -->
+  <div class="tab-panel" id="panel-planner">
+    <div class="sec-hdr"><div class="sec-title">Target Income Planner</div><div class="sec-sub">Calculate the exact moves needed to reach your income goals per tax bucket</div></div>
+    <div id="planner-content"></div>
+  </div>
+
+</div><!-- /content -->
+
+<!-- REVIEW MODAL -->
+<div class="modal-bg" id="review-modal" style="display:none;">
+  <div class="modal-box">
+    <div class="modal-hdr">
+      <div class="modal-title">📋 Confirm Account — <span id="rv-filename" style="color:var(--text2);font-weight:500;font-size:13px;"></span></div>
+    </div>
+    <div class="modal-body">
+      <div id="rv-summary" style="display:flex;gap:16px;margin-bottom:14px;flex-wrap:wrap;"></div>
+      <div class="form-group">
+        <label class="form-label">Account Name <span style="color:var(--text3);font-weight:400">(auto-filled — edit if needed)</span></label>
+        <input class="input" id="rv-name" placeholder="e.g. Fidelity Roth IRA">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Tax Treatment <span style="color:var(--text3);font-weight:400">(auto-detected — verify)</span></label>
+        <select class="input" id="rv-tax">
+          <option value="taxable">Taxable (Standard Brokerage / Bank)</option>
+          <option value="tax-deferred">Tax-Deferred (Traditional IRA / 401k / 403b)</option>
+          <option value="tax-free">Tax-Free (Roth IRA / HSA / 529)</option>
+        </select>
+      </div>
+      <div id="rv-preview"></div>
+    </div>
+    <div class="modal-ftr">
+      <div class="modal-progress" id="rv-progress"></div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" onclick="skipReview()">Skip File</button>
+        <button class="btn btn-primary" onclick="confirmReview()">✅ Add Account</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toast-wrap"></div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────
+// KNOWLEDGE BASE
+// ─────────────────────────────────────────────────────────────────────
+const TDB = {
+  'VOO':{ac:'Stocks',sc:'Large Cap US',ey:1.3},'VTI':{ac:'Stocks',sc:'Total Market US',ey:1.4},
+  'SPY':{ac:'Stocks',sc:'Large Cap US',ey:1.3},'IVV':{ac:'Stocks',sc:'Large Cap US',ey:1.3},
+  'FXAIX':{ac:'Stocks',sc:'Large Cap US',ey:1.3},'FSKAX':{ac:'Stocks',sc:'Total Market US',ey:1.4},
+  'FZROX':{ac:'Stocks',sc:'Total Market US',ey:1.4},'QQQ':{ac:'Stocks',sc:'Large Cap Growth',ey:0.6},
+  'QQQM':{ac:'Stocks',sc:'Large Cap Growth',ey:0.6},'VUG':{ac:'Stocks',sc:'Large Cap Growth',ey:0.5},
+  'VTV':{ac:'Stocks',sc:'Large Cap Value',ey:2.5},'IWM':{ac:'Stocks',sc:'Small Cap US',ey:1.2},
+  'IJR':{ac:'Stocks',sc:'Small Cap US',ey:1.5},'VB':{ac:'Stocks',sc:'Small Cap US',ey:1.3},
+  'SCHB':{ac:'Stocks',sc:'Total Market US',ey:1.4},'SCHX':{ac:'Stocks',sc:'Large Cap US',ey:1.3},
+  'MGK':{ac:'Stocks',sc:'Mega Cap Growth',ey:0.4},'SPLG':{ac:'Stocks',sc:'Large Cap US',ey:1.3},
+  'RSP':{ac:'Stocks',sc:'Equal Weight US',ey:1.8},'VV':{ac:'Stocks',sc:'Large Cap US',ey:1.4},
+  'VXUS':{ac:'Stocks',sc:'International',ey:3.2},'VEA':{ac:'Stocks',sc:'Developed Markets',ey:3.5},
+  'VWO':{ac:'Stocks',sc:'Emerging Markets',ey:3.2},'EFA':{ac:'Stocks',sc:'Developed Markets',ey:3.3},
+  'EEM':{ac:'Stocks',sc:'Emerging Markets',ey:2.8},'IXUS':{ac:'Stocks',sc:'International',ey:3.1},
+  'FZILX':{ac:'Stocks',sc:'International',ey:3.1},'SCHF':{ac:'Stocks',sc:'Developed Markets',ey:3.3},
+  'SCHD':{ac:'Stocks',sc:'Dividend',ey:3.5},'VYM':{ac:'Stocks',sc:'High Dividend',ey:3.0},
+  'DVY':{ac:'Stocks',sc:'High Dividend',ey:4.0},'HDV':{ac:'Stocks',sc:'High Dividend',ey:3.8},
+  'DGRO':{ac:'Stocks',sc:'Dividend Growth',ey:2.5},'VIG':{ac:'Stocks',sc:'Dividend Growth',ey:1.8},
+  'VNQ':{ac:'Stocks',sc:'REIT',ey:4.0},'SCHH':{ac:'Stocks',sc:'REIT',ey:3.5},
+  'IYR':{ac:'Stocks',sc:'REIT',ey:3.8},'O':{ac:'Stocks',sc:'REIT',ey:5.5},
+  'GLD':{ac:'Stocks',sc:'Commodity',ey:0},'IAU':{ac:'Stocks',sc:'Commodity',ey:0},
+  'SLV':{ac:'Stocks',sc:'Commodity',ey:0},'GLDM':{ac:'Stocks',sc:'Commodity',ey:0},
+  'BND':{ac:'Bonds',sc:'Total Bond Market',ey:4.5},'AGG':{ac:'Bonds',sc:'Total Bond Market',ey:4.4},
+  'VBTLX':{ac:'Bonds',sc:'Total Bond Market',ey:4.5},'FXNAX':{ac:'Bonds',sc:'Total Bond Market',ey:4.4},
+  'SGOV':{ac:'Cash',sc:'Short Treasury',ey:5.2},'BIL':{ac:'Cash',sc:'Short Treasury',ey:5.3},
+  'SHV':{ac:'Cash',sc:'Short Treasury',ey:5.2},'TFLO':{ac:'Cash',sc:'Float Rate Treasury',ey:5.3},
+  'SHY':{ac:'Bonds',sc:'Short Treasury',ey:4.8},'VGSH':{ac:'Bonds',sc:'Short Treasury',ey:4.8},
+  'SCHO':{ac:'Bonds',sc:'Short Treasury',ey:4.7},'IEF':{ac:'Bonds',sc:'Intermediate Treasury',ey:4.2},
+  'VGIT':{ac:'Bonds',sc:'Intermediate Treasury',ey:4.3},'TLT':{ac:'Bonds',sc:'Long Treasury',ey:4.5},
+  'VGLT':{ac:'Bonds',sc:'Long Treasury',ey:4.6},'EDV':{ac:'Bonds',sc:'Long Treasury',ey:4.2},
+  'SCHP':{ac:'Bonds',sc:'TIPS',ey:2.2},'VTIP':{ac:'Bonds',sc:'TIPS',ey:2.0},'TIP':{ac:'Bonds',sc:'TIPS',ey:2.2},
+  'MUB':{ac:'Bonds',sc:'Muni Bonds',ey:3.2,mu:true},'VTEB':{ac:'Bonds',sc:'Muni Bonds',ey:3.3,mu:true},
+  'TFI':{ac:'Bonds',sc:'Muni Bonds',ey:3.1,mu:true},'HYD':{ac:'Bonds',sc:'Muni Bonds',ey:4.5,mu:true},
+  'CMF':{ac:'Bonds',sc:'Muni Bonds',ey:3.0,mu:true},'ITM':{ac:'Bonds',sc:'Muni Bonds',ey:3.3,mu:true},
+  'VCSH':{ac:'Bonds',sc:'Short Corp Bond',ey:5.0},'VCIT':{ac:'Bonds',sc:'Intermediate Corp',ey:5.1},
+  'VCLT':{ac:'Bonds',sc:'Long Corp Bond',ey:5.3},'LQD':{ac:'Bonds',sc:'Intermediate Corp',ey:5.0},
+  'IGIB':{ac:'Bonds',sc:'Intermediate Corp',ey:5.1},'IGSB':{ac:'Bonds',sc:'Short Corp Bond',ey:4.9},
+  'HYG':{ac:'Bonds',sc:'High Yield',ey:6.8},'JNK':{ac:'Bonds',sc:'High Yield',ey:6.9},
+  'USHY':{ac:'Bonds',sc:'High Yield',ey:7.0},'ANGL':{ac:'Bonds',sc:'High Yield',ey:6.5},
+  'VWOB':{ac:'Bonds',sc:'EM Bond',ey:6.5},'EMB':{ac:'Bonds',sc:'EM Bond',ey:6.3},
+  'JAAA':{ac:'Bonds',sc:'CLO AAA',ey:6.2},'JBBB':{ac:'Bonds',sc:'CLO BBB',ey:7.5},
+  'AAA':{ac:'Bonds',sc:'CLO AAA',ey:6.0},'USFR':{ac:'Cash',sc:'Float Rate Treasury',ey:5.4},
+  'FLOT':{ac:'Bonds',sc:'Float Rate Corp',ey:5.3},'FLRN':{ac:'Bonds',sc:'Float Rate Corp',ey:5.2},
+  'VMFXX':{ac:'Cash',sc:'Money Market',ey:5.1},'SPAXX':{ac:'Cash',sc:'Money Market',ey:5.0},
+  'FDRXX':{ac:'Cash',sc:'Money Market',ey:5.0},'SWVXX':{ac:'Cash',sc:'Money Market',ey:5.1},
+  'FDLXX':{ac:'Cash',sc:'Money Market',ey:5.2},'SPRXX':{ac:'Cash',sc:'Money Market',ey:5.0},
+  // JEPI/JEPQ hold ~85% equities + ~15% equity-linked notes (covered call overlay)
+  'JEPI':{ac:'Mixed',sc:'Covered Call',ey:7.5,lt:{Stocks:0.85,Cash:0.15}},
+  'JEPQ':{ac:'Mixed',sc:'Covered Call',ey:9.0,lt:{Stocks:0.85,Cash:0.15}},
+  'QYLD':{ac:'Mixed',sc:'Covered Call',ey:11.0},'RYLD':{ac:'Mixed',sc:'Covered Call',ey:9.5},
+  'XYLD':{ac:'Mixed',sc:'Covered Call',ey:9.0},'DIVO':{ac:'Mixed',sc:'Covered Call',ey:4.5},
+  'BNDX':{ac:'Bonds',sc:'International Bond',ey:4.2},'IAGG':{ac:'Bonds',sc:'International Bond',ey:4.0},
+  // iShares Core Allocation ETFs — look-through to underlying stock/bond split
+  'AOM':{ac:'Mixed',sc:'Moderate Allocation',ey:2.8,lt:{Stocks:0.40,Bonds:0.60}},
+  'AOA':{ac:'Mixed',sc:'Aggressive Allocation',ey:2.0,lt:{Stocks:0.80,Bonds:0.20}},
+  'AOR':{ac:'Mixed',sc:'Growth Allocation',ey:2.2,lt:{Stocks:0.60,Bonds:0.40}},
+  'AOK':{ac:'Mixed',sc:'Conservative Allocation',ey:3.2,lt:{Stocks:0.30,Bonds:0.70}},
+  // Betterment bond portfolio ETFs
+  'BINC':{ac:'Bonds',sc:'Flexible Income',ey:7.2},'CLOA':{ac:'Bonds',sc:'CLO AAA',ey:6.1},
+  'EMLC':{ac:'Bonds',sc:'EM Bond',ey:6.2},'HYDB':{ac:'Bonds',sc:'High Yield',ey:7.0},
+  'IGEB':{ac:'Bonds',sc:'Intermediate Corp',ey:5.0},'IGLB':{ac:'Bonds',sc:'Long Corp Bond',ey:5.5},
+  'QLTA':{ac:'Bonds',sc:'Short Corp Bond',ey:4.8},'SHYG':{ac:'Bonds',sc:'High Yield',ey:6.5},
+  'USIG':{ac:'Bonds',sc:'Intermediate Corp',ey:5.1},
+  // Chase / individual brokerage ETFs
+  'BUCK':{ac:'Bonds',sc:'Short Treasury',ey:7.5},'VTEC':{ac:'Bonds',sc:'Muni Bonds',ey:3.5,mu:true},
+  // Fidelity FDIC-insured deposit sweep (appears as "CORE**" in Fidelity exports)
+  'CORE**':{ac:'Cash',sc:'Cash Sweep',ey:0.5},
+
+  // ── Fidelity Mutual Funds ─────────────────────────────────────────────
+  // FADMX: Fidelity Strategic Income — ~40% HY corp, ~25% IG corp, ~15% US gov, ~20% other
+  'FADMX':{ac:'Bonds',sc:'Multi-Sector Bond',ey:5.8},
+  // FIPDX: Fidelity Inflation-Protected Bond Index — pure TIPS
+  'FIPDX':{ac:'Bonds',sc:'TIPS',ey:2.2},
+  // FTBFX: Fidelity Total Bond Fund — broad investment-grade US bond market
+  'FTBFX':{ac:'Bonds',sc:'Total Bond Market',ey:4.6},
+  // FBKFX: Fidelity Balanced K6 — ~68% domestic stocks / ~32% bonds (Fidelity 500 + bond ladders)
+  'FBKFX':{ac:'Mixed',sc:'Balanced 60/40',ey:1.8,lt:{Stocks:0.68,Bonds:0.32}},
+  // FNBXX: Fidelity Government Money Market K6 — institutional share class
+  'FNBXX':{ac:'Cash',sc:'Money Market',ey:5.0},
+
+  // ── Vanguard Mutual Funds ─────────────────────────────────────────────
+  // VASGX: Vanguard LifeStrategy Growth — 80% global equities / 20% bonds
+  'VASGX':{ac:'Mixed',sc:'Growth Allocation 80/20',ey:1.4,lt:{Stocks:0.80,Bonds:0.20}},
+
+  // ── Missing ETFs ──────────────────────────────────────────────────────
+  // VIOO: Vanguard S&P Small-Cap 600 ETF
+  'VIOO':{ac:'Stocks',sc:'Small Cap US',ey:1.2},
+  // QQQE: Direxion NASDAQ-100 Equal Weight ETF — equal-weighted Nasdaq-100
+  'QQQE':{ac:'Stocks',sc:'Large Cap Growth',ey:0.7},
+  // PGHY: Invesco Global ex-US High Yield Corporate Bond ETF
+  'PGHY':{ac:'Bonds',sc:'International High Yield',ey:6.8},
+  // QACDS: Chase brokerage CD / structured note identifier
+  'QACDS':{ac:'Cash',sc:'Certificate of Deposit',ey:4.7},
+
+  // ── US Large Cap Technology (GICS: Information Technology) ────────────
+  'NVDA':{ac:'Stocks',sc:'US Technology',ey:0.03},'AAPL':{ac:'Stocks',sc:'US Technology',ey:0.5},
+  'MSFT':{ac:'Stocks',sc:'US Technology',ey:0.8},'AVGO':{ac:'Stocks',sc:'US Technology',ey:1.3},
+  'CSCO':{ac:'Stocks',sc:'US Technology',ey:2.9},'CRM':{ac:'Stocks',sc:'US Technology',ey:0.0},
+  'ORCL':{ac:'Stocks',sc:'US Technology',ey:1.2},'NOW':{ac:'Stocks',sc:'US Technology',ey:0.0},
+
+  // ── US Communication Services (GICS: Communication Services) ─────────
+  'GOOGL':{ac:'Stocks',sc:'US Communication',ey:0.5},'META':{ac:'Stocks',sc:'US Communication',ey:0.4},
+  'NFLX':{ac:'Stocks',sc:'US Communication',ey:0.0},'SPOT':{ac:'Stocks',sc:'US Communication',ey:0.0},
+
+  // ── US Large Cap Healthcare (GICS: Health Care) ───────────────────────
+  'LLY':{ac:'Stocks',sc:'US Healthcare',ey:0.7},'PFE':{ac:'Stocks',sc:'US Healthcare',ey:6.8},
+  'MRK':{ac:'Stocks',sc:'US Healthcare',ey:3.6},'JNJ':{ac:'Stocks',sc:'US Healthcare',ey:3.3},
+  'UNH':{ac:'Stocks',sc:'US Healthcare',ey:1.8},'ABBV':{ac:'Stocks',sc:'US Healthcare',ey:3.4},
+  'TMO':{ac:'Stocks',sc:'US Healthcare',ey:0.3},'DHR':{ac:'Stocks',sc:'US Healthcare',ey:0.4},
+  'ISRG':{ac:'Stocks',sc:'US Healthcare',ey:0.0},
+
+  // ── US Large Cap Financials (GICS: Financials) ────────────────────────
+  'GS':{ac:'Stocks',sc:'US Financials',ey:2.2},'JPM':{ac:'Stocks',sc:'US Financials',ey:2.4},
+  'C':{ac:'Stocks',sc:'US Financials',ey:3.2},'BAC':{ac:'Stocks',sc:'US Financials',ey:2.4},
+  'MS':{ac:'Stocks',sc:'US Financials',ey:3.5},'V':{ac:'Stocks',sc:'US Financials',ey:0.8},
+  'MA':{ac:'Stocks',sc:'US Financials',ey:0.6},'AXP':{ac:'Stocks',sc:'US Financials',ey:1.3},
+  'SCHW':{ac:'Stocks',sc:'US Financials',ey:1.5},
+
+  // ── US Large Cap Industrials (GICS: Industrials) ──────────────────────
+  'CAT':{ac:'Stocks',sc:'US Industrials',ey:1.4},'RTX':{ac:'Stocks',sc:'US Industrials',ey:2.2},
+  'GE':{ac:'Stocks',sc:'US Industrials',ey:0.7},'CMI':{ac:'Stocks',sc:'US Industrials',ey:2.8},
+  'CSX':{ac:'Stocks',sc:'US Industrials',ey:1.4},'UNP':{ac:'Stocks',sc:'US Industrials',ey:2.3},
+  'DE':{ac:'Stocks',sc:'US Industrials',ey:1.7},'ITW':{ac:'Stocks',sc:'US Industrials',ey:2.5},
+  'EMR':{ac:'Stocks',sc:'US Industrials',ey:2.0},'BA':{ac:'Stocks',sc:'US Industrials',ey:0.0},
+  'JCI':{ac:'Stocks',sc:'US Industrials',ey:1.7},
+
+  // ── US Consumer (Discretionary + Staples) ────────────────────────────
+  'AMZN':{ac:'Stocks',sc:'US Consumer',ey:0.0},'WMT':{ac:'Stocks',sc:'US Consumer',ey:1.0},
+  'HD':{ac:'Stocks',sc:'US Consumer',ey:2.5},'COST':{ac:'Stocks',sc:'US Consumer',ey:0.5},
+  'SBUX':{ac:'Stocks',sc:'US Consumer',ey:3.0},'PEP':{ac:'Stocks',sc:'US Consumer',ey:3.5},
+  'PG':{ac:'Stocks',sc:'US Consumer',ey:2.5},
+
+  // ── US Energy (GICS: Energy) ──────────────────────────────────────────
+  'XOM':{ac:'Stocks',sc:'US Energy',ey:3.5},'CVX':{ac:'Stocks',sc:'US Energy',ey:4.2},
+
+  // ── US Materials (GICS: Materials) ────────────────────────────────────
+  'FCX':{ac:'Stocks',sc:'US Materials',ey:1.8},
+
+  // ── US REIT (GICS: Real Estate) ───────────────────────────────────────
+  'CCI':{ac:'Stocks',sc:'REIT',ey:5.8},
+
+  // ── International Developed — Europe ─────────────────────────────────
+  // Semiconductors/Tech
+  'ASML':{ac:'Stocks',sc:'Intl Developed',ey:0.9},'SAP':{ac:'Stocks',sc:'Intl Developed',ey:1.2},
+  'SIEGY':{ac:'Stocks',sc:'Intl Developed',ey:2.8},
+  // Pharma/Healthcare
+  'AZN':{ac:'Stocks',sc:'Intl Developed',ey:2.0},'NVS':{ac:'Stocks',sc:'Intl Developed',ey:3.6},
+  'GSK':{ac:'Stocks',sc:'Intl Developed',ey:3.8},'RHHBY':{ac:'Stocks',sc:'Intl Developed',ey:3.5},
+  'NSRGY':{ac:'Stocks',sc:'Intl Developed',ey:2.8},'FRCOY':{ac:'Stocks',sc:'Intl Developed',ey:1.8},
+  // Banking/Financial
+  'UBS':{ac:'Stocks',sc:'Intl Developed',ey:2.1},'BCS':{ac:'Stocks',sc:'Intl Developed',ey:3.5},
+  'DB':{ac:'Stocks',sc:'Intl Developed',ey:2.5},'HSBC':{ac:'Stocks',sc:'Intl Developed',ey:5.0},
+  'LYG':{ac:'Stocks',sc:'Intl Developed',ey:4.5},'RY':{ac:'Stocks',sc:'Intl Developed',ey:3.8},
+  'SCGLY':{ac:'Stocks',sc:'Intl Developed',ey:4.0},'UNCRY':{ac:'Stocks',sc:'Intl Developed',ey:3.5},
+  // Consumer/Luxury
+  'UL':{ac:'Stocks',sc:'Intl Developed',ey:3.5},'BUD':{ac:'Stocks',sc:'Intl Developed',ey:1.5},
+  'LVMUY':{ac:'Stocks',sc:'Intl Developed',ey:2.0},'CFRUY':{ac:'Stocks',sc:'Intl Developed',ey:2.2},
+  // Telecom
+  'DTEGY':{ac:'Stocks',sc:'Intl Developed',ey:3.5},
+  // Industrials/Aerospace/Defense
+  'VLVHY':{ac:'Stocks',sc:'Intl Developed',ey:3.0},'VLVLY':{ac:'Stocks',sc:'Intl Developed',ey:3.0},
+  'SAFRY':{ac:'Stocks',sc:'Intl Developed',ey:1.5},
+  // Energy (UK/Netherlands)
+  'BP':{ac:'Stocks',sc:'Intl Developed',ey:5.5},'SHEL':{ac:'Stocks',sc:'Intl Developed',ey:4.0},
+
+  // ── International Developed — Asia/Pacific ────────────────────────────
+  // Semiconductors/Tech
+  'TSM':{ac:'Stocks',sc:'Intl Developed',ey:1.8},'TOELY':{ac:'Stocks',sc:'Intl Developed',ey:2.2},
+  'MRAAY':{ac:'Stocks',sc:'Intl Developed',ey:1.8},'SONY':{ac:'Stocks',sc:'Intl Developed',ey:0.5},
+  'FANUY':{ac:'Stocks',sc:'Intl Developed',ey:2.0},
+  // Automotive
+  'TM':{ac:'Stocks',sc:'Intl Developed',ey:2.5},'MHVIY':{ac:'Stocks',sc:'Intl Developed',ey:1.5},
+  // Banking/Financial
+  'MUFG':{ac:'Stocks',sc:'Intl Developed',ey:3.2},'ANZGY':{ac:'Stocks',sc:'Intl Developed',ey:4.2},
+  'HKXCY':{ac:'Stocks',sc:'Intl Developed',ey:4.5},'ISNPY':{ac:'Stocks',sc:'Intl Developed',ey:2.0},
+  // Trading/Diversified
+  'MARUY':{ac:'Stocks',sc:'Intl Developed',ey:2.8},
+  // Mining (Australia/UK-listed)
+  'RIO':{ac:'Stocks',sc:'Intl Developed',ey:6.5},'BHP':{ac:'Stocks',sc:'Intl Developed',ey:5.0},
+};
+
+const KW_MAP = [
+  {kw:['s&p 500','sp 500','large cap'],ac:'Stocks',sc:'Large Cap US',ey:1.3},
+  {kw:['total stock','total market','us stock'],ac:'Stocks',sc:'Total Market US',ey:1.4},
+  {kw:['international','foreign equity','world ex'],ac:'Stocks',sc:'International',ey:3.0},
+  {kw:['small cap','mid cap','extended market'],ac:'Stocks',sc:'Small Cap US',ey:1.2},
+  {kw:['dividend','income equity'],ac:'Stocks',sc:'Dividend',ey:3.0},
+  {kw:['reit','real estate investment'],ac:'Stocks',sc:'REIT',ey:4.0},
+  {kw:['covered call','buy-write'],ac:'Mixed',sc:'Covered Call',ey:8.0},
+  {kw:['total bond','us bond','aggregate bond','bond index'],ac:'Bonds',sc:'Total Bond Market',ey:4.5},
+  {kw:['municipal','muni','tax exempt','tax-exempt'],ac:'Bonds',sc:'Muni Bonds',ey:3.2,mu:true},
+  {kw:['high yield','junk bond'],ac:'Bonds',sc:'High Yield',ey:7.0},
+  {kw:['short term treasury','t-bill','treasury bill'],ac:'Cash',sc:'Short Treasury',ey:5.2},
+  {kw:['corporate bond','investment grade'],ac:'Bonds',sc:'Intermediate Corp',ey:5.0},
+  {kw:['money market','government money','settlement fund','core position'],ac:'Cash',sc:'Money Market',ey:5.0},
+  {kw:['floating rate','float rate'],ac:'Bonds',sc:'Float Rate Corp',ey:5.2},
+  {kw:['inflation','tips','treasury inflat'],ac:'Bonds',sc:'TIPS',ey:2.2},
+  {kw:['betterment cash reserve','cash reserve','everyday savings'],ac:'Cash',sc:'Cash Reserve (Betterment)',ey:4.8},
+  {kw:['savings account','high yield savings','hysa','high-yield savings','high yield cash'],ac:'Cash',sc:'Savings Account',ey:4.8},
+  {kw:['ally savings','marcus savings','wealthfront cash','sofi savings','capital one savings'],ac:'Cash',sc:'Savings Account',ey:4.9},
+  {kw:['checking account','checking'],ac:'Cash',sc:'Checking Account',ey:0.5},
+  {kw:['certificate of deposit','cd account','share certificate'],ac:'Cash',sc:'Certificate of Deposit',ey:4.7},
+  {kw:['deposit sweep','sweep account','cash sweep'],ac:'Cash',sc:'Cash Sweep',ey:0.5},
+  {kw:['cash','reserve'],ac:'Cash',sc:'Cash Reserve',ey:4.5},
+  {kw:['balanced','60/40'],ac:'Mixed',sc:'Balanced',ey:2.5},
+];
+
+// ─────────────────────────────────────────────────────────────────────
+// STATE MUNI DATABASE — state income tax rate + best muni ETFs per state
+// ─────────────────────────────────────────────────────────────────────
+const STATE_MUNI_DB = {
+  AL:{rate:5.0, name:'Alabama',    etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  AK:{rate:0,   name:'Alaska',     etfs:[{t:'SGOV',d:'0-3M T-Bill ETF (state-exempt)',ey:5.3}]},
+  AZ:{rate:2.5, name:'Arizona',    etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  AR:{rate:4.4, name:'Arkansas',   etfs:[{t:'VTEB',d:'Vanguard Tax-Exempt Bond ETF',ey:3.3}]},
+  CA:{rate:13.3,name:'California', etfs:[{t:'CMF', d:'iShares CA Muni Bond ETF',ey:3.3},{t:'VTEC',d:'Vanguard CA Tax-Exempt Fund',ey:3.4}]},
+  CO:{rate:4.4, name:'Colorado',   etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  CT:{rate:6.99,name:'Connecticut',etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  DE:{rate:6.6, name:'Delaware',   etfs:[{t:'VTEB',d:'Vanguard Tax-Exempt Bond ETF',ey:3.3}]},
+  FL:{rate:0,   name:'Florida',    etfs:[{t:'SGOV',d:'0-3M T-Bill ETF (state-exempt)',ey:5.3}]},
+  GA:{rate:5.75,name:'Georgia',    etfs:[{t:'VTEB',d:'Vanguard Tax-Exempt Bond ETF',ey:3.3}]},
+  HI:{rate:11.0,name:'Hawaii',     etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  ID:{rate:5.8, name:'Idaho',      etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  IL:{rate:4.95,name:'Illinois',   etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  IN:{rate:3.15,name:'Indiana',    etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  IA:{rate:6.0, name:'Iowa',       etfs:[{t:'VTEB',d:'Vanguard Tax-Exempt Bond ETF',ey:3.3}]},
+  KS:{rate:5.7, name:'Kansas',     etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  KY:{rate:4.5, name:'Kentucky',   etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  LA:{rate:4.25,name:'Louisiana',  etfs:[{t:'VTEB',d:'Vanguard Tax-Exempt Bond ETF',ey:3.3}]},
+  ME:{rate:7.15,name:'Maine',      etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  MD:{rate:5.75,name:'Maryland',   etfs:[{t:'MFM', d:'Nuveen MD Quality Muni Inc Fund',ey:3.0},{t:'VTEB',d:'Vanguard Tax-Exempt Bond ETF',ey:3.3}]},
+  MA:{rate:9.0, name:'Massachusetts',etfs:[{t:'VMATX',d:'Vanguard MA Tax-Exempt Fund',ey:3.1},{t:'MHI',d:'Pioneer Muni High Income',ey:3.4}]},
+  MI:{rate:4.25,name:'Michigan',   etfs:[{t:'VTEB',d:'Vanguard Tax-Exempt Bond ETF',ey:3.3}]},
+  MN:{rate:9.85,name:'Minnesota',  etfs:[{t:'VMNIX',d:'Vanguard MN Long-Term Tax-Exempt',ey:3.1},{t:'MUB',d:'iShares National Muni Bond ETF',ey:3.2}]},
+  MS:{rate:5.0, name:'Mississippi',etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  MO:{rate:4.95,name:'Missouri',   etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  MT:{rate:6.75,name:'Montana',    etfs:[{t:'VTEB',d:'Vanguard Tax-Exempt Bond ETF',ey:3.3}]},
+  NE:{rate:5.84,name:'Nebraska',   etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  NV:{rate:0,   name:'Nevada',     etfs:[{t:'SGOV',d:'0-3M T-Bill ETF (state-exempt)',ey:5.3}]},
+  NH:{rate:0,   name:'New Hampshire',etfs:[{t:'SGOV',d:'0-3M T-Bill ETF (state-exempt)',ey:5.3}]},
+  NJ:{rate:10.75,name:'New Jersey',etfs:[{t:'VNJUX',d:'Vanguard NJ Long-Term Tax-Exempt',ey:3.2},{t:'MUB',d:'iShares National Muni Bond ETF',ey:3.2}]},
+  NM:{rate:5.9, name:'New Mexico', etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  NY:{rate:10.9,name:'New York',   etfs:[{t:'NYF', d:'iShares NY Muni Bond ETF',ey:3.0},{t:'MYNY',d:'VanEck NY Muni Income ETF',ey:3.2}]},
+  NC:{rate:4.75,name:'North Carolina',etfs:[{t:'MUB',d:'iShares National Muni Bond ETF',ey:3.2}]},
+  ND:{rate:2.5, name:'North Dakota',etfs:[{t:'MUB',d:'iShares National Muni Bond ETF',ey:3.2}]},
+  OH:{rate:3.99,name:'Ohio',       etfs:[{t:'VOHIX',d:'Vanguard OH Long-Term Tax-Exempt',ey:2.8},{t:'MUB',d:'iShares National Muni Bond ETF',ey:3.2}]},
+  OK:{rate:4.75,name:'Oklahoma',   etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  OR:{rate:9.9, name:'Oregon',     etfs:[{t:'VTEB',d:'Vanguard Tax-Exempt Bond ETF',ey:3.3},{t:'MUB',d:'iShares National Muni Bond ETF',ey:3.2}]},
+  PA:{rate:3.07,name:'Pennsylvania',etfs:[{t:'VPGIX',d:'Vanguard PA Long-Term Tax-Exempt',ey:2.9},{t:'MUB',d:'iShares National Muni Bond ETF',ey:3.2}]},
+  RI:{rate:5.99,name:'Rhode Island',etfs:[{t:'VTEB',d:'Vanguard Tax-Exempt Bond ETF',ey:3.3}]},
+  SC:{rate:7.0, name:'South Carolina',etfs:[{t:'MUB',d:'iShares National Muni Bond ETF',ey:3.2}]},
+  SD:{rate:0,   name:'South Dakota',etfs:[{t:'SGOV',d:'0-3M T-Bill ETF (state-exempt)',ey:5.3}]},
+  TN:{rate:0,   name:'Tennessee',  etfs:[{t:'SGOV',d:'0-3M T-Bill ETF (state-exempt)',ey:5.3}]},
+  TX:{rate:0,   name:'Texas',      etfs:[{t:'SGOV',d:'0-3M T-Bill ETF (state-exempt)',ey:5.3}]},
+  UT:{rate:4.65,name:'Utah',       etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  VT:{rate:8.75,name:'Vermont',    etfs:[{t:'VTEB',d:'Vanguard Tax-Exempt Bond ETF',ey:3.3}]},
+  VA:{rate:5.75,name:'Virginia',   etfs:[{t:'VAVAX',d:'American Funds VA Tax-Exempt',ey:3.1},{t:'MUB',d:'iShares National Muni Bond ETF',ey:3.2}]},
+  WA:{rate:0,   name:'Washington', etfs:[{t:'USFR',d:'WisdomTree Floating Rate Treasury',ey:5.3}]},
+  WV:{rate:6.5, name:'West Virginia',etfs:[{t:'MUB',d:'iShares National Muni Bond ETF',ey:3.2}]},
+  WI:{rate:7.65,name:'Wisconsin',  etfs:[{t:'MUB', d:'iShares National Muni Bond ETF',ey:3.2}]},
+  WY:{rate:0,   name:'Wyoming',    etfs:[{t:'BIL', d:'SPDR 1-3 Month T-Bill ETF',ey:5.3}]},
+};
+
+const BUY_SIGS = {
+  Stocks:{'tax-free':[{t:'VTI',d:'Vanguard Total Market'},{t:'QQQ',d:'Nasdaq-100'}],
+           taxable:[{t:'VTI',d:'Vanguard Total Market'},{t:'VOO',d:'S&P 500'}],
+           'tax-deferred':[{t:'VTI',d:'Vanguard Total Market'},{t:'FXAIX',d:'Fidelity 500 Index'}]},
+  Bonds:{'tax-free':[{t:'BND',d:'Total Bond Market'},{t:'VCIT',d:'Intermediate Corp'}],
+          taxable:[{t:'MUB',d:'iShares Muni (Tax-Exempt)'},{t:'VTEB',d:'Vanguard Tax-Exempt'}],
+          'tax-deferred':[{t:'BND',d:'Total Bond Market'},{t:'JAAA',d:'CLO AAA'}]},
+  Cash:{'tax-free':[{t:'SGOV',d:'0-3M T-Bill'},{t:'USFR',d:'Float Rate Treasury'}],
+         taxable:[{t:'SGOV',d:'0-3M T-Bill'},{t:'BIL',d:'1-3M T-Bill'}],
+         'tax-deferred':[{t:'SGOV',d:'0-3M T-Bill'},{t:'VMFXX',d:'Vanguard MM'}]},
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// STATE
+// ─────────────────────────────────────────────────────────────────────
+const S = { accounts:[], activeTab:'ingestion', optimizerResult:null, plannerResult:null, sessionPin:null };
+let allocChart = null;
+let reviewQueue = [];
+let reviewIdx = 0;
+let procItems = []; // [{name, status, result}]
+let optExTF = false, planStrategies = new Set(['reallocate']), planExTF = false;
+
+// ─────────────────────────────────────────────────────────────────────
+// SESSION ENCRYPTION  (AES-256-GCM + PBKDF2 via Web Crypto API)
+// All financial data is encrypted before touching localStorage.
+// The PIN never leaves memory and is never stored anywhere.
+// ─────────────────────────────────────────────────────────────────────
+const _SKEY = 'portfolio_pro_enc_v1';
+const _b64e = b => btoa(String.fromCharCode(...new Uint8Array(b)));
+const _b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+async function _deriveKey(pin, salt) {
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    {name:'PBKDF2', salt, iterations:150000, hash:'SHA-256'},
+    km, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']
+  );
+}
+
+async function saveSession() {
+  if (!S.sessionPin || !S.accounts.length) return;
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv   = crypto.getRandomValues(new Uint8Array(12));
+  const key  = await _deriveKey(S.sessionPin, salt);
+  const ct   = await crypto.subtle.encrypt({name:'AES-GCM',iv}, key, new TextEncoder().encode(JSON.stringify(S.accounts)));
+  localStorage.setItem(_SKEY, JSON.stringify({
+    v:1, salt:_b64e(salt), iv:_b64e(iv), data:_b64e(ct),
+    ts:Date.now(), acct:S.accounts.length
+  }));
+  updateNavSession();
+}
+
+async function unlockSession() {
+  const pin = document.getElementById('lock-pin').value;
+  const errEl = document.getElementById('lock-error');
+  if (!pin) { errEl.textContent = 'Please enter your PIN.'; return; }
+  const raw = localStorage.getItem(_SKEY);
+  if (!raw) { hideLockScreen(); return; }
+  const stored = JSON.parse(raw);
+  try {
+    const key = await _deriveKey(pin, _b64d(stored.salt));
+    const pt  = await crypto.subtle.decrypt({name:'AES-GCM', iv:_b64d(stored.iv)}, key, _b64d(stored.data));
+    S.accounts = JSON.parse(new TextDecoder().decode(pt));
+    S.sessionPin = pin;
+    errEl.textContent = '';
+    hideLockScreen();
+    renderIngestion();
+    if (S.accounts.length) { switchTab('allocation'); toast(`Unlocked — ${S.accounts.length} account(s) restored`); }
+  } catch {
+    errEl.textContent = '❌ Incorrect PIN. Try again.';
+    document.getElementById('lock-pin').value = '';
+    document.getElementById('lock-pin').focus();
+  }
+}
+
+function lockSession() {
+  S.accounts = []; S.sessionPin = null; S.plannerResult = null; S.optimizerResult = null;
+  renderIngestion(); switchTab('ingestion');
+  showLockScreen();
+  toast('Session locked — data cleared from memory', 'warn');
+}
+
+function showLockScreen() {
+  const el = document.getElementById('lockscreen');
+  if (!el) return;
+  const raw = localStorage.getItem(_SKEY);
+  if (raw) {
+    const m = JSON.parse(raw);
+    const d = new Date(m.ts);
+    document.getElementById('lock-meta').textContent =
+      `Last saved: ${d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})} at ${d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})} · ${m.acct||'?'} account(s)`;
+  }
+  el.style.display = 'flex';
+  setTimeout(() => document.getElementById('lock-pin')?.focus(), 120);
+}
+
+function hideLockScreen() {
+  const el = document.getElementById('lockscreen');
+  if (el) el.style.display = 'none';
+  updateNavSession();
+}
+
+function clearSessionConfirm() {
+  if (!confirm('Permanently delete all saved data and start over?\n\nThis cannot be undone.')) return;
+  localStorage.removeItem(_SKEY);
+  S.accounts = []; S.sessionPin = null; S.plannerResult = null; S.optimizerResult = null;
+  hideLockScreen(); renderIngestion(); updateNavSession();
+  toast('All saved data cleared', 'warn');
+}
+
+function showPinSetup() {
+  ['setup-pin','setup-pin2'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('setup-error').textContent = '';
+  document.getElementById('pin-setup-bg').style.display = 'flex';
+  setTimeout(() => document.getElementById('setup-pin')?.focus(), 100);
+}
+
+async function savePinSetup() {
+  const p1 = document.getElementById('setup-pin').value;
+  const p2 = document.getElementById('setup-pin2').value;
+  const err = document.getElementById('setup-error');
+  if (p1.length < 4) { err.textContent = 'PIN must be at least 4 characters.'; return; }
+  if (p1 !== p2) { err.textContent = 'PINs do not match — please try again.'; return; }
+  S.sessionPin = p1;
+  document.getElementById('pin-setup-bg').style.display = 'none';
+  await saveSession();
+  toast('Session encrypted & saved 🔒');
+}
+
+function skipPinSetup() {
+  document.getElementById('pin-setup-bg').style.display = 'none';
+  toast('Skipped — data will be lost on refresh', 'warn');
+}
+
+async function confirmChangePIN() {
+  const old = document.getElementById('chg-old').value;
+  const n1  = document.getElementById('chg-new').value;
+  const n2  = document.getElementById('chg-new2').value;
+  const err = document.getElementById('chg-error');
+  if (old !== S.sessionPin) { err.textContent = 'Current PIN is incorrect.'; return; }
+  if (n1.length < 4) { err.textContent = 'New PIN must be at least 4 characters.'; return; }
+  if (n1 !== n2) { err.textContent = 'New PINs do not match.'; return; }
+  S.sessionPin = n1;
+  document.getElementById('change-pin-bg').style.display = 'none';
+  await saveSession();
+  toast('PIN updated — session re-encrypted 🔑');
+}
+
+async function exportBackup() {
+  const raw = localStorage.getItem(_SKEY);
+  if (!raw) { toast('No saved session to export', 'err'); return; }
+  const blob = new Blob([raw], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const dt = new Date().toISOString().slice(0,10);
+  a.href = url; a.download = `portfolio-backup-${dt}.enc.json`;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+  toast('Encrypted backup downloaded 💾');
+}
+
+function importBackupPrompt() {
+  document.getElementById('backup-file-input').click();
+}
+
+async function importBackupFile(evt) {
+  const file = evt.target.files[0]; if (!file) return;
+  evt.target.value = '';
+  let raw;
+  try { raw = await file.text(); JSON.parse(raw); } catch { toast('Invalid backup file', 'err'); return; }
+  localStorage.setItem(_SKEY, raw);
+  const pin = prompt('Enter the PIN for this backup:');
+  if (!pin) return;
+  document.getElementById('lock-pin').value = pin;
+  showLockScreen();
+  await unlockSession();
+}
+
+function updateNavSession() {
+  const ns = document.getElementById('nav-session');
+  const hasSaved = !!localStorage.getItem(_SKEY);
+  const active = S.accounts.length > 0 || hasSaved;
+  if (ns) ns.style.display = active ? 'flex' : 'none';
+  const lbl = document.getElementById('nsb-label');
+  const btn = document.getElementById('nsb-status');
+  if (lbl && btn) {
+    const saved = hasSaved && !!S.sessionPin;
+    lbl.textContent = saved ? 'Auto-saved' : hasSaved ? 'Locked' : 'Not saved';
+    btn.className = 'nsb ' + (saved ? 'saved' : hasSaved ? '' : 'unsaved');
+    btn.title = saved ? 'Data encrypted & saved in browser' : hasSaved ? 'Encrypted data on disk — session locked' : 'Data not yet saved — set a PIN';
+    btn.onclick = saved ? ()=>document.getElementById('change-pin-bg').style.display='flex' : null;
+    btn.style.cursor = saved ? 'pointer' : 'default';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// UTILS
+// ─────────────────────────────────────────────────────────────────────
+const fc = v => isNaN(+v)?'$0':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:0,maximumFractionDigits:0}).format(+v);
+const fp = (v,d=1) => isNaN(+v)?'0%':(+v).toFixed(d)+'%';
+const uid = () => Math.random().toString(36).slice(2,9);
+const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
+function toast(msg, type='ok', dur=3200) {
+  const el = document.createElement('div');
+  el.className = 'toast '+type;
+  el.textContent = msg;
+  document.getElementById('toast-wrap').appendChild(el);
+  setTimeout(()=>el.remove(), dur);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// APY / INTEREST RATE EXTRACTION — used by both CSV and PDF parsers
+// ─────────────────────────────────────────────────────────────────────
+function extractAPY(text) {
+  if (!text) return null;
+  // Ordered from most specific to most generic to avoid false positives
+  const patterns = [
+    // "4.75% APY" or "4.75% Annual Percentage Yield"
+    /(\d{1,2}\.\d{1,4})\s*%\s*(?:apy|annual\s+percentage\s+yield)/i,
+    // "APY: 4.75%" or "APY 4.75%"
+    /\bapy[:\s]+(\d{1,2}\.\d{1,4})\s*%?/i,
+    // "Annual Percentage Yield: 4.75%"
+    /annual\s+percentage\s+yield[:\s]+(\d{1,2}\.\d{1,4})\s*%?/i,
+    // "Variable APY 4.75%" / "Current APY 4.75%"
+    /(?:variable|current|earning[s]?)\s+(?:apy|rate)[:\s]+(\d{1,2}\.\d{1,4})\s*%?/i,
+    // "Interest Rate: 4.75%" (savings context)
+    /interest\s+rate[:\s]+(\d{1,2}\.\d{1,4})\s*%/i,
+    // "Earning 4.75% interest" / "Earn 4.75% APY"
+    /earn(?:ing)?\s+(\d{1,2}\.\d{1,4})\s*%\s*(?:apy|interest|annually)?/i,
+    // "Rate 4.75%" (short form in tables/headers)
+    /\brate[:\s]+(\d{1,2}\.\d{1,4})\s*%/i,
+  ];
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m) {
+      const v = parseFloat(m[1]);
+      // Sanity check: realistic savings/bond rate range 0.01% – 25%
+      if (v > 0 && v <= 25) return v;
+    }
+  }
+
+  // ── Tabular APY: handle "APR ... APY" column headers with values on a subsequent row
+  // Betterment format: header row "Balance Date Deposit Bank Balance APR APY"
+  //                    data row   "Apr 30 2026  Betterment ...  $X   3.20% 3.25%"
+  const tabMatch = text.match(/\bAPR\b[^\n]*\bAPY\b[^\n]*([\s\S]{0,600})/i);
+  if (tabMatch) {
+    // Collect all percentages that appear after the header row (up to 600 chars / ~3 rows)
+    const pcts = [...tabMatch[1].matchAll(/(\d{1,2}\.\d{2})\s*%/g)].map(m => parseFloat(m[1]));
+    // APR comes before APY in the header — APY value is the 2nd percentage found
+    if (pcts.length >= 2) { const v = pcts[1]; if (v > 0 && v <= 25) return v; }
+    if (pcts.length === 1) { const v = pcts[0]; if (v > 0 && v <= 25) return v; }
+  }
+  // Also try just "APY" as a column header with a percentage on the next few lines
+  const apyColMatch = text.match(/\bAPY\b[^\n]*([\s\S]{0,400})/i);
+  if (apyColMatch) {
+    const pcts = [...apyColMatch[1].matchAll(/(\d{1,2}\.\d{2})\s*%/g)].map(m => parseFloat(m[1]));
+    for (const v of pcts) { if (v > 0 && v <= 25) return v; }
+  }
+
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CSV UTILITIES
+// ─────────────────────────────────────────────────────────────────────
+function parseCsvLine(line) {
+  const r=[]; let cur='',inQ=false;
+  for(let i=0;i<line.length;i++){
+    const c=line[i];
+    if(c==='"'){inQ=!inQ;}
+    else if(c===','&&!inQ){r.push(cur.trim());cur='';}
+    else{cur+=c;}
+  }
+  r.push(cur.trim());
+  return r;
+}
+function cleanN(s){if(!s)return NaN;return parseFloat(String(s).replace(/[$,%\s'"]/g,'').replace(/\(/g,'-').replace(/\)/g,''));}
+function cleanS(s){return String(s||'').replace(/['"]/g,'').trim().toUpperCase();}
+
+// ─────────────────────────────────────────────────────────────────────
+// INDIVIDUAL BOND DESCRIPTION CLASSIFIER
+// Handles individual treasury, agency, muni, CD, and corporate bonds
+// that have empty ticker fields (e.g. Chase brokerage CSV exports)
+// ─────────────────────────────────────────────────────────────────────
+function classifyBondDesc(desc, ytm, coupon) {
+  if(!desc) return null;
+  const d = desc.toUpperCase();
+  const y = parseFloat(ytm) || parseFloat(coupon) || 0;
+
+  // Certificate of Deposit / FDIC-insured
+  if (/C\/D\b|FDIC\s*INS|CERTIFICATE\s+OF\s+DEPOSIT/.test(d))
+    return {ac:'Cash', sc:'Certificate of Deposit', ey:y||4.7, mu:false};
+
+  // Deposit sweep / cash sweep
+  if (/DEPOSIT\s+SWEEP|CASH\s+SWEEP|\bSWEEP\b/.test(d))
+    return {ac:'Cash', sc:'Cash Sweep', ey:y||0.5, mu:false};
+
+  // US Treasury (bills, notes, bonds) — handles full names, abbreviations (UST, TREASU NT) and CUSIPs
+  if (/UNITED\s+STATES\s+TREASURY|U\.S\.?\s+TREAS|US\s+TREASU|UST\s+(NOTE|BILL|BOND|\d)|\bTREASURY\s+(BILL|NOTE|BOND)/.test(d)) {
+    if (/BILL|\bBL\b|\bT-?BILL/.test(d))     return {ac:'Cash',  sc:'Short Treasury',        ey:y||5.2, mu:false};
+    if (/NOTE|\bNT\b|\bUST\s+NOTE/.test(d))  return {ac:'Bonds', sc:'Intermediate Treasury', ey:y||4.5, mu:false};
+    return                                           {ac:'Bonds', sc:'Long Treasury',         ey:y||4.8, mu:false};
+  }
+
+  // Agency / GSE bonds
+  if (/FEDERAL\s+HOME\s+LOAN|FHLB\b|FNMA\b|FREDDIE\s+MAC|FHLMC\b|FANNIE\s+MAE|FEDERAL\s+NATIONAL\s+MORT|FEDERAL\s+FARM\s+CREDIT|FARM\s+CREDIT\b|FEDERAL\s+AGRIC/.test(d))
+    return {ac:'Bonds', sc:'Agency Bond', ey:y||5.0, mu:false};
+
+  // Municipal bonds — GO bonds, revenue bonds, school/transit/authority/utility bonds
+  // Handles both full words and common abbreviations used in brokerage exports (e.g. Chase)
+  if (/\bGO\s+BDS\b|\bGEN(?:ERAL)?\s+OBLIG|REV(?:ENUE)?\s+BDS?\b|\bREV\s+BDS\b|AUTH\s+REV\b|SCH(?:OOL)?\s+DIST|UNIFIED\s+SCH|EDUC(?:ATION)?\s+FAC|TRANSIT\s+AUTH|TRANSN\s+AUTH|AIRPORT|ARPTS?\b|WATER\s+DIST|WTR\s+DIST|WTR\s+&\s+P\b|DEPT\s+WTR\b|SANIT(?:ATION)?|\bELECTION\s+GO\b|\bMUNI\b|TAX\s+ALLOC|PUBLIC\s+UTIL|CITY\s*&\s*CNTY|CNTY\s+OF\b|\bPORT\s+AUTH\b|\bHWY\s+AUTH\b/.test(d.replace(/\n/g,' ')))
+    return {ac:'Bonds', sc:'Muni Bonds', ey:y||3.5, mu:true};
+
+  // Has a yield — likely corporate or other fixed income
+  if (y > 0)
+    return {ac:'Bonds', sc:'Corporate Bond', ey:y, mu:false};
+
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// POSITION CLASSIFIER
+// ─────────────────────────────────────────────────────────────────────
+function classify(sym, desc, rawY, coupon) {
+  const s = cleanS(sym);
+  // Combine desc + sym for keyword lookup — catches rows like "Cash & Cash Investments"
+  // where the ticker field IS the description (e.g. Schwab brokerage cash rows)
+  const d = ((desc||'') + ' ' + (sym||'')).toLowerCase();
+  if(TDB[s]) return {ac:TDB[s].ac,sc:TDB[s].sc,ey:TDB[s].ey,mu:!!TDB[s].mu,lt:TDB[s].lt||null};
+  for(const k of KW_MAP) if(k.kw.some(w=>d.includes(w))) return {ac:k.ac,sc:k.sc,ey:k.ey,mu:!!k.mu};
+  // Individual bond description fallback (for bonds with empty ticker / CUSIP as sym)
+  const bd = classifyBondDesc(desc, rawY, coupon);
+  if(bd) return bd;
+  const y=parseFloat(rawY)||0;
+  if(y>6) return {ac:'Bonds',sc:'High Yield',ey:y,mu:false};
+  if(y>3) return {ac:'Bonds',sc:'Fixed Income',ey:y,mu:false};
+  return {ac:'Stocks',sc:'Equity',ey:y||1.3,mu:false};
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// DETECT FROM FILENAME
+// ─────────────────────────────────────────────────────────────────────
+function detectFilename(fname) {
+  const base = fname.replace(/\.[^.]+$/, '');
+  const f = base.toLowerCase();
+
+  // ── Tax treatment (same logic as before) ─────────────────────────
+  let tx = 'taxable';
+  if(f.includes('roth')||f.includes('hsa')||f.includes('529')||f.includes('taxpaid')||f.includes('tax-paid')||f.includes('taxfree')||f.includes('tax-free')) tx='tax-free';
+  else if(f.includes('traditional')||f.includes('401k')||f.includes('403b')||f.includes('taxdeferred')||f.includes('tax-deferred')||(f.includes('ira')&&!f.includes('roth'))) tx='tax-deferred';
+
+  // ── Clean noise from filename ─────────────────────────────────────
+  // Remove trailing date stamps like "-2026-05-08-123856" or "_2026-05-08"
+  let c = base.replace(/[-_]\d{4}[-\/]\d{2}[-\/]\d{2}(?:[-_]\d+)?$/, '');
+  // Remove common export noise words (with optional leading separator)
+  c = c.replace(/[-_ ]?positions?/gi, '').replace(/[-_ ]?holdings?/gi, '')
+       .replace(/[-_ ]?export/gi, '').replace(/[-_ ]?report/gi, '');
+  // Split CamelCase/PascalCase (e.g. "TaxDeferred" → "Tax Deferred", "LosAltos" → "Los Altos")
+  c = c.replace(/([a-z])([A-Z])/g, '$1 $2');
+  // Add space between alpha↔digit transitions ("IRA2026" → "IRA 2026", "Chase1" → "Chase 1")
+  c = c.replace(/([A-Za-z])(\d)/g, '$1 $2').replace(/(\d)([A-Za-z])/g, '$1 $2');
+  // Normalize separators to spaces
+  c = c.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+  // ── Broker detection — extract canonical name and remove from label ─
+  const BROKERS = [
+    {r:/\bschwab\b|\bschawb\b/i, n:'Schwab'},
+    {r:/\bfidelity\b|\bfid\b/i,  n:'Fidelity'},
+    {r:/\bvanguard\b/i,           n:'Vanguard'},
+    {r:/\be\s*trade\b|\betrade\b/i, n:'E*TRADE'},
+    {r:/\bbetterment\b/i,         n:'Betterment'},
+    {r:/\bmerrill\b/i,            n:'Merrill'},
+    {r:/\brobinhood\b/i,          n:'Robinhood'},
+    {r:/\bwealthfront\b/i,        n:'Wealthfront'},
+    {r:/\bchase\b/i,              n:'Chase'},
+    {r:/\bally\b/i,               n:'Ally'},
+    {r:/\bmarcus\b/i,             n:'Marcus'},
+    {r:/\btd\s*ameritrade\b/i,    n:'TD Ameritrade'},
+    {r:/\bmorgan\s*stanley\b/i,   n:'Morgan Stanley'},
+    {r:/\bsofi\b/i,               n:'SoFi'},
+  ];
+  let broker = '';
+  for(const b of BROKERS){
+    if(b.r.test(c)){ broker=b.n; c=c.replace(b.r,'').replace(/\s+/g,' ').trim(); break; }
+  }
+
+  // ── Account type detection — extract canonical type and remove from label ─
+  const TYPES = [
+    {r:/\broth\s*ira\b/i,        n:'Roth IRA'},
+    {r:/\broth\b/i,              n:'Roth IRA'},
+    {r:/\btraditional\s*ira\b/i, n:'Traditional IRA'},
+    {r:/\btax\s*deferred\b/i,    n:'IRA (Tax-Deferred)'},
+    {r:/\bira\b/i,               n:'IRA'},
+    {r:/\b401\s*k\b/i,           n:'401(k)'},
+    {r:/\b403\s*b\b/i,           n:'403(b)'},
+    {r:/\bhsa\b/i,               n:'HSA'},
+    {r:/\b529\b/,                n:'529 Plan'},
+    {r:/\bbrokerage\b/i,         n:'Brokerage'},
+  ];
+  let acctType = '';
+  for(const t of TYPES){
+    if(t.r.test(c)){
+      acctType = t.n;
+      // Remove the matched pattern AND related account-type keywords from the label
+      c = c.replace(t.r, '');
+      ['\\broth\\b','\\btraditional\\b','\\bira\\b','\\b401\\s*k\\b','\\b403\\s*b\\b',
+       '\\bhsa\\b','\\b529\\b','\\bbrokerage\\b'].forEach(kw=>{ c=c.replace(new RegExp(kw,'gi'),''); });
+      c = c.replace(/\s+/g,' ').trim();
+      break;
+    }
+  }
+
+  // ── Strip any remaining tax descriptor words ──────────────────────
+  c = c.replace(/\btax\s*paid\b|\btax\s*deferred\b|\btax\s*free\b|\btaxable\b/gi, '')
+       .replace(/\s+/g,' ').trim();
+
+  // ── Compose final name ─────────────────────────────────────────────
+  const nm = [broker, acctType, c].filter(Boolean).join(' ')
+    || base.replace(/[-_]/g,' ');
+
+  return {tx, nm};
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// DETECT FROM CONTENT
+// ─────────────────────────────────────────────────────────────────────
+function detectContent(text) {
+  const t = text.toLowerCase();
+  let tx = null, nm = null;
+
+  // Tax treatment from content
+  if(/roth\s+ira/i.test(t)||/roth\s+account/i.test(t)) tx='tax-free';
+  else if(/health\s+savings|hsa\b/.test(t)) tx='tax-free';
+  else if(/529\s+plan/i.test(t)) tx='tax-free';
+  else if(/traditional\s+ira/i.test(t)||/trad(\.?)\s+ira/i.test(t)) tx='tax-deferred';
+  else if(/401\(k\)|401k\b/i.test(t)) tx='tax-deferred';
+  else if(/403\(b\)|403b\b/i.test(t)) tx='tax-deferred';
+  else if(/sep[\s-]ira|simple[\s-]ira/i.test(t)) tx='tax-deferred';
+  else if(/individual\s+(brokerage|account)|taxable\s+account/i.test(t)) tx='taxable';
+
+  // Account name from content
+  const brokers = [
+    {r:/fidelity/i,n:'Fidelity'},{r:/schwab/i,n:'Schwab'},{r:/vanguard/i,n:'Vanguard'},
+    {r:/merrill/i,n:'Merrill'},{r:/e[\*\s]?trade/i,n:'E*TRADE'},{r:/td\s+ameritrade/i,n:'TD Ameritrade'},
+    {r:/morgan\s+stanley/i,n:'Morgan Stanley'},{r:/j\.?p\.?\s*morgan/i,n:'JPMorgan'},
+    {r:/raymond\s+james/i,n:'Raymond James'},{r:/edward\s+jones/i,n:'Edward Jones'},
+    {r:/ally\s+bank|ally\s+invest/i,n:'Ally'},{r:/marcus\s+by\s+goldman|marcus/i,n:'Marcus by Goldman Sachs'},
+    {r:/robinhood/i,n:'Robinhood'},{r:/wealthfront/i,n:'Wealthfront'},
+    {r:/betterment/i,n:'Betterment'},{r:/sofi/i,n:'SoFi'},
+    {r:/wells\s+fargo/i,n:'Wells Fargo'},{r:/bank\s+of\s+america/i,n:'Bank of America'},
+    {r:/chase/i,n:'Chase'},{r:/citibank|citi\b/i,n:'Citi'},
+    {r:/american\s+express\s+savings|amex\s+savings/i,n:'Amex Savings'},
+    {r:/capital\s+one/i,n:'Capital One'},{r:/discover\s+bank/i,n:'Discover'},
+    {r:/synchrony\s+bank/i,n:'Synchrony'},{r:/citizens\s+bank/i,n:'Citizens'},
+  ];
+  const types = [
+    {r:/roth\s+ira/i,n:'Roth IRA'},{r:/traditional\s+ira/i,n:'Traditional IRA'},
+    {r:/401\(k\)|401k/i,n:'401(k)'},{r:/403\(b\)|403b/i,n:'403(b)'},
+    {r:/health\s+savings|hsa\b/i,n:'HSA'},{r:/529/i,n:'529 Plan'},
+    {r:/brokerage\s+account|individual\s+brokerage/i,n:'Brokerage Account'},
+    // Betterment-specific product names
+    {r:/cash\s+reserve/i,n:'Cash Reserve'},{r:/everyday\s+savings/i,n:'Everyday Savings'},
+    // Generic savings/bank types
+    {r:/high[\s-]yield\s+savings/i,n:'High-Yield Savings Account'},
+    {r:/savings\s+account/i,n:'Savings Account'},{r:/checking\s+account/i,n:'Checking Account'},
+    {r:/money\s+market/i,n:'Money Market Account'},
+    {r:/certificate\s+of\s+deposit|\bcd\b/i,n:'Certificate of Deposit'},
+  ];
+  let broker='', type='';
+  for(const b of brokers) if(b.r.test(text)){broker=b.n;break;}
+  for(const tp of types) if(tp.r.test(text)){type=tp.n;break;}
+  if(broker&&type) nm=`${broker} ${type}`;
+  else if(broker) nm=`${broker} Account`;
+  else if(type) nm=type;
+  return {tx,nm};
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CSV PARSER (flexible header detection + APY extraction)
+// ─────────────────────────────────────────────────────────────────────
+function parseCSV(text, fname) {
+  const lines = text.split(/\r?\n/);
+  let hIdx=-1, cm={};
+  const symHdrs  = ['symbol','ticker'];
+  const valHdrs  = ['market value','current value','total value','ending value','amount','balance','value'];
+  const descHdrs = ['description','security name','investment name','name','security','account name','account'];
+  const apyHdrs  = ['apy','annual percentage yield','interest rate','rate','yield','annual yield'];
+
+  // ── Pass 1: Look for a standard positions table ───────────────────
+  for(let i=0;i<Math.min(lines.length,30);i++){
+    const ll = lines[i].toLowerCase();
+    if((symHdrs.some(s=>ll.includes(s))||ll.includes('cusip')) && (ll.includes('value')||ll.includes('amount')||ll.includes('price'))){
+      hIdx=i;
+      const cols = parseCsvLine(lines[i]);
+      cols.forEach((h,idx)=>{
+        const hl=h.toLowerCase().replace(/['"]/g,'').trim();
+        if(symHdrs.some(k=>hl===k||hl.startsWith(k))) cm.sym??=idx;
+        if(hl==='cusip') cm.cusip??=idx;            // separate CUSIP column
+        if(descHdrs.some(k=>hl.includes(k))) cm.desc??=idx;
+        if(valHdrs.some(k=>hl===k)) cm.val??=idx;  // exact match first (catches plain "Value")
+        if(cm.val===undefined && valHdrs.some(k=>hl.includes(k))) cm.val=idx;
+        if(hl==='ytm'||hl==='yield to maturity'||hl==='ytm %') cm.ytm??=idx; // YTM column
+        if(apyHdrs.some(k=>hl===k||hl.includes(k))) cm.yld??=idx;
+        if(hl==='quantity'||hl==='qty'||hl==='shares'||hl.startsWith('qty')||hl.includes('quantity')) cm.qty??=idx;
+        if(hl.includes('last price')||hl==='price'||hl==='last') cm.price??=idx;
+        if(hl==='coupon'||hl==='coupon rate'||hl==='coupon %') cm.cpn??=idx; // coupon column
+      });
+      break;
+    }
+  }
+
+  // ── Pass 2: Savings/bank CSV — look for APY+balance row structure ─
+  // e.g. Betterment, Ally, Marcus exports with columns like:
+  //   Account | Balance | APY   OR   Account Name | Ending Balance | Interest Rate
+  if(hIdx<0) {
+    for(let i=0;i<Math.min(lines.length,30);i++){
+      const ll=lines[i].toLowerCase();
+      const hasBalance = valHdrs.some(k=>ll.includes(k));
+      const hasRate    = apyHdrs.some(k=>ll.includes(k));
+      const hasAccount = descHdrs.some(k=>ll.includes(k));
+      if(hasBalance && (hasRate||hasAccount)){
+        hIdx=i;
+        const cols=parseCsvLine(lines[i]);
+        cols.forEach((h,idx)=>{
+          const hl=h.toLowerCase().replace(/['"]/g,'').trim();
+          if(descHdrs.some(k=>hl.includes(k))) cm.desc??=idx;
+          if(valHdrs.some(k=>hl.includes(k))) cm.val??=idx;
+          if(apyHdrs.some(k=>hl===k||hl.includes(k))) cm.yld??=idx;
+        });
+        cm.savingsMode=true; // signals single-balance rows
+        break;
+      }
+    }
+  }
+
+  if(hIdx<0) return null;
+
+  // ── Build positions ───────────────────────────────────────────────
+  const positions=[];
+  for(let i=hIdx+1;i<lines.length;i++){
+    const line=lines[i].trim(); if(!line) continue;
+    const cols=parseCsvLine(line);
+
+    if(cm.savingsMode){
+      // Row represents a cash account (savings, checking, CD, etc.)
+      const desc=(cm.desc!==undefined?cols[cm.desc]:'').replace(/['"]/g,'').trim();
+      const value=cleanN(cm.val!==undefined?cols[cm.val]:'');
+      if(isNaN(value)||value<=0) continue;
+      const rawY=cm.yld!==undefined?cleanN(cols[cm.yld])||0:0;
+      const info=classify('CASH',desc,rawY);
+      positions.push({
+        id:uid(),symbol:'SAVINGS',description:desc||'Savings Account',
+        assetClass:'Cash',subClass:info.sc,
+        value,yield:rawY||info.ey,estimatedYield:info.ey,
+        isMuni:false,isEst:rawY===0,detectedRate:rawY||null
+      });
+      continue;
+    }
+
+    // Standard positions table
+    let sym=cleanS(cols[cm.sym]||'');
+    // For individual bonds: ticker may be empty — fall back to CUSIP as unique identifier
+    if((!sym||sym.length>10) && cm.cusip!==undefined){
+      sym=cleanS(cols[cm.cusip]||'');
+    }
+    if(!sym) continue;
+    const symL=sym.toLowerCase();
+    if(['total','subtotal','pending','account','grand','','-','--','n/a'].includes(symL)) continue;
+    if(symL.startsWith('total')||symL.startsWith('account')||symL.startsWith('grand')) continue;
+    // Skip summary/footer rows: "Positions Total", "Account Total", "Grand Total" etc.
+    // These are long strings (not tickers) that contain 'total' or 'subtotal'
+    if(sym.length > 10 && (symL.includes('total')||symL.includes('subtotal'))) continue;
+
+    let value=cleanN(cm.val!==undefined?cols[cm.val]:'');
+    if(isNaN(value)||value<=0){
+      const qty=cleanN(cm.qty!==undefined?cols[cm.qty]:'');
+      const price=cleanN(cm.price!==undefined?cols[cm.price]:'');
+      if(!isNaN(qty)&&!isNaN(price)&&qty>0&&price>0) value=qty*price;
+    }
+    if(isNaN(value)||value<=0) continue;
+
+    const desc=(cm.desc!==undefined?cols[cm.desc]:'').replace(/['"]/g,'').trim()||sym;
+    // Prefer YTM over coupon/rate; coupon passed to classifyBondDesc as fallback
+    let rawY=0;
+    if(cm.ytm!==undefined) rawY=cleanN(cols[cm.ytm])||0;
+    if(!rawY && cm.yld!==undefined) rawY=cleanN(cols[cm.yld])||0;
+    const coupon=cm.cpn!==undefined?cleanN(cols[cm.cpn])||0:0;
+    const info=classify(sym,desc,rawY,coupon);
+    // Display symbol: for CUSIP-keyed bonds, show the description excerpt instead
+    const displaySym = sym.length===9&&/^[0-9A-Z]{9}$/.test(sym)
+      ? (desc.slice(0,20)||sym) : sym;
+    positions.push({
+      id:uid(),symbol:displaySym,description:desc,
+      assetClass:info.ac,subClass:info.sc,
+      value,yield:rawY||coupon||info.ey,estimatedYield:info.ey,
+      isMuni:info.mu,isEst:(rawY===0&&coupon===0),detectedRate:rawY||coupon||null,
+      lt:info.lt||null
+    });
+  }
+
+  // ── Pass 3: If no positions, scan whole CSV for inline APY mention ─
+  // Then try single-value extraction for simple bank exports
+  if(positions.length===0){
+    const wholeText=text;
+    const detectedRate=extractAPY(wholeText);
+    // Look for a lone dollar balance anywhere
+    const balM=wholeText.match(/\$\s*([\d,]{3,}(?:\.\d{2})?)/);
+    if(balM){
+      const val=parseFloat(balM[1].replace(/,/g,''));
+      if(val>0){
+        const d=detectContent(wholeText);
+        const sc=detectedRate? (detectedRate>1?'Savings Account':'Checking Account') :'Cash Reserve';
+        positions.push({
+          id:uid(),symbol:'SAVINGS',description:'Account Balance',
+          assetClass:'Cash',subClass:sc,
+          value:val,yield:detectedRate||4.5,estimatedYield:4.5,
+          isMuni:false,isEst:!detectedRate,detectedRate
+        });
+      }
+    }
+  }
+
+  return positions.length>0?positions:null;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// XLSX PARSER (via SheetJS)
+// ─────────────────────────────────────────────────────────────────────
+function parseXLSX(arrayBuffer, fname) {
+  try {
+    const wb = XLSX.read(new Uint8Array(arrayBuffer), {type:'array'});
+    let best = null;
+    for(const sn of wb.SheetNames){
+      const ws = wb.Sheets[sn];
+      const csv = XLSX.utils.sheet_to_csv(ws);
+      const pos = parseCSV(csv, fname);
+      if(pos&&(!best||pos.length>best.length)) best=pos;
+    }
+    return best;
+  } catch(e){ console.error('XLSX parse error',e); return null; }
+}
+
+function xlsxToText(arrayBuffer) {
+  try {
+    const wb = XLSX.read(new Uint8Array(arrayBuffer), {type:'array'});
+    return wb.SheetNames.map(sn=>XLSX.utils.sheet_to_csv(wb.Sheets[sn])).join('\n');
+  } catch(e){ return ''; }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// PDF PARSER — layout-aware text extraction
+// ─────────────────────────────────────────────────────────────────────
+async function parsePDF(arrayBuffer) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const pdf = await pdfjsLib.getDocument({data:arrayBuffer}).promise;
+  let rows = []; // [{y, text, items:[{x,str}]}]
+  let fullText = '';
+
+  for(let pi=1;pi<=pdf.numPages;pi++){
+    const page = await pdf.getPage(pi);
+    const tc = await page.getTextContent();
+    const rowMap = {};
+    for(const item of tc.items){
+      if(!item.str.trim()) continue;
+      const y = Math.round(item.transform[5]/4)*4;
+      if(!rowMap[y]) rowMap[y]={y,items:[]};
+      rowMap[y].items.push({x:item.transform[4],str:item.str});
+    }
+    const pageRows = Object.values(rowMap)
+      .sort((a,b)=>b.y-a.y)
+      .map(r=>({y:r.y,text:r.items.sort((a,b)=>a.x-b.x).map(i=>i.str).join(' ')}));
+    rows=rows.concat(pageRows);
+    fullText+=pageRows.map(r=>r.text).join('\n')+'\n';
+  }
+
+  return {rows, fullText};
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// PDF → POSITIONS (security rows detection)
+// ─────────────────────────────────────────────────────────────────────
+function extractPDFPositions(rows, fullText) {
+  const positions = [];
+  const seen = new Set();
+  // Require explicit $ to avoid matching share quantities like 0.094917 as "$94,917"
+  // Matches: $5.87  $12.23  $127,086.22  $1,234.56
+  const moneyRE = /\$([\d]{1,3}(?:,\d{3})*(?:\.\d{2})?)/g;
+  for(const row of rows){
+    const t = row.text;
+    // Scan ALL uppercase tokens on the row to find a recognized ticker.
+    // (Holdings rows often have "ETF" before the ticker symbol, e.g.
+    //  "iShares Flexible Income Active ETF BINC 0.094917 $4.93 … $5.87")
+    const allSymM = [...t.matchAll(/\b([A-Z]{2,6})\b/g)];
+    let sym = null;
+    for(const m of allSymM){ if(TDB[m[1]]){sym=m[1];break;} }
+    if(!sym) continue;
+    if(seen.has(sym)) continue;
+    // Extract dollar amounts (require explicit $ sign to avoid false matches)
+    const amounts = [];
+    [...t.matchAll(moneyRE)].forEach(m=>amounts.push(parseFloat(m[1].replace(/,/g,''))));
+    // For small brokerage accounts (e.g. Betterment ~$55 total), lower threshold to $0.50
+    const value = amounts.length ? Math.max(...amounts) : 0;
+    if(value < 0.5) continue;
+    seen.add(sym);
+    const info = TDB[sym];
+    positions.push({
+      id:uid(),symbol:sym,description:t.replace(sym,'').replace(moneyRE,'').trim().slice(0,60)||sym,
+      assetClass:info.ac,subClass:info.sc,value,
+      yield:info.ey,estimatedYield:info.ey,isMuni:!!info.mu,isEst:true,lt:info.lt||null
+    });
+  }
+  return positions;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// PDF → BALANCE + APY EXTRACTION
+// ─────────────────────────────────────────────────────────────────────
+function extractPDFBalanceAndRate(fullText) {
+  // ── Step 1: Extract APY / interest rate from anywhere in the doc ──
+  const detectedRate = extractAPY(fullText);
+
+  // ── Step 2: Find contextual account balances ──────────────────────
+  // Each pattern has: regex, sub-class, default yield (used only if no APY found), display label
+  // Listed from most specific (Betterment/bank) to most generic (brokerage)
+  const patterns = [
+    // ── Betterment-specific: require $ to avoid matching account numbers ──
+    // e.g. "Cash Reserve $127,086.22"  NOT "Cash Reserve 8400140452776 Transfer"
+    {re:/cash\s+reserve(?:\s+account)?[^$\n]{0,40}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Cash Reserve (Betterment)', ey:4.8, d:'Cash Reserve'},
+    {re:/everyday\s+(?:savings|cash)[^$\n]{0,40}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Cash Reserve (Betterment)', ey:4.8, d:'Everyday Savings'},
+    // ── High-yield / online savings ──
+    {re:/high[\s-]yield\s+savings[^$\n]{0,60}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Savings Account', ey:4.9, d:'High-Yield Savings'},
+    {re:/online\s+savings[^$\n]{0,60}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Savings Account', ey:4.9, d:'Online Savings Account'},
+    // ── Standard savings / checking / MM / CD ──
+    {re:/savings\s+account[^$\n]{0,60}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Savings Account', ey:4.5, d:'Savings Account'},
+    {re:/checking\s+account[^$\n]{0,60}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Checking Account', ey:0.5, d:'Checking Account'},
+    {re:/money\s+market[^$\n]{0,60}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Money Market', ey:5.0, d:'Money Market'},
+    {re:/certificate\s+of\s+deposit[^$\n]{0,60}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Certificate of Deposit', ey:4.7, d:'CD'},
+    {re:/\b(?:term\s+)?cd\b[^$\n]{0,60}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Certificate of Deposit', ey:4.7, d:'CD'},
+    // ── Brokerage / generic — require $ to avoid account numbers ──
+    // e.g. "Ending Balance (Apr 30 2026) $127,086.22"
+    {re:/ending\s+balance[^$\n]{0,80}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Cash Reserve', ey:4.5, d:'Ending Balance'},
+    {re:/total\s+account\s+value[^$\n]{0,40}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Cash Reserve', ey:4.5, d:'Account Value'},
+    {re:/portfolio\s+value[^$\n]{0,40}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Cash Reserve', ey:4.5, d:'Portfolio Value'},
+    {re:/net\s+account\s+value[^$\n]{0,40}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Cash Reserve', ey:4.5, d:'Net Account Value'},
+    {re:/total\s+value[^$\n]{0,40}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Cash Reserve', ey:4.5, d:'Total Value'},
+    {re:/account\s+balance[^$\n]{0,40}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Cash Reserve', ey:4.5, d:'Account Balance'},
+    {re:/your\s+balance[^$\n]{0,40}\$\s*([\d,]+(?:\.\d{2})?)/i,
+      sc:'Cash Reserve', ey:4.5, d:'Your Balance'},
+  ];
+
+  const results = [];
+  for(const p of patterns){
+    const m = fullText.match(p.re);
+    if(m){
+      const val = parseFloat(m[1].replace(/,/g,''));
+      // Sanity check: realistic account balance range $1 – $50M
+      if(val >= 1 && val <= 50_000_000){
+        // Use real detected APY when available; otherwise fall back to sub-class default
+        const effectiveYield = detectedRate ?? p.ey;
+        results.push({
+          description: p.d,
+          value: val,
+          subClass: p.sc,
+          ey: effectiveYield,
+          detectedRate,          // null if not found
+          isEst: detectedRate == null,
+        });
+      }
+    }
+  }
+  return { balances: results, detectedRate };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// MASTER FILE PARSER
+// ─────────────────────────────────────────────────────────────────────
+async function parseFile(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  const {tx:fnTx, nm:fnNm} = detectFilename(file.name);
+  let positions = [];
+  let contentText = '';
+  let detectedRateForReview = null; // populated when APY is found in the document
+
+  if(ext==='csv'){
+    contentText = await file.text();
+    const pos = parseCSV(contentText, file.name);
+    if(pos) positions = pos;
+  } else if(ext==='xlsx'||ext==='xls'){
+    const buf = await file.arrayBuffer();
+    const pos = parseXLSX(buf, file.name);
+    if(pos) positions = pos;
+    contentText = xlsxToText(buf);
+  } else if(ext==='pdf'){
+    const buf = await file.arrayBuffer();
+    const {rows, fullText} = await parsePDF(buf);
+    contentText = fullText;
+
+    // ── Try to extract individual securities (e.g. brokerage with tickers) ──
+    const secPos = extractPDFPositions(rows, fullText);
+    // ── Also always attempt savings/balance extraction ──
+    const { balances, detectedRate: pdfRate } = extractPDFBalanceAndRate(fullText);
+
+    if(secPos.length > 0 && pdfRate != null && pdfRate > 0){
+      // ── Multi-account PDF: has BOTH ETF positions AND a savings balance (e.g. Betterment)
+      // Return multiple review items — handled by handleFileList
+      const {tx:cTx, nm:cNm} = detectContent(contentText);
+      const detectedTx = cTx || fnTx;
+      // Build a savings account item from the largest balance found
+      const savBal = balances.length ? balances.reduce((a,b) => b.value > a.value ? b : a, balances[0]) : null;
+      const extraItems = [];
+      if(savBal) {
+        const savSym = savBal.subClass.includes('Checking') ? 'CHK'
+                     : savBal.subClass.includes('CD')       ? 'CD'
+                     : savBal.subClass.includes('Market')   ? 'MMF'
+                     : 'SAV';
+        const savPos = [{
+          id:uid(), symbol:savSym, description:savBal.description,
+          assetClass:'Cash', subClass:savBal.subClass,
+          value:savBal.value, yield:savBal.ey, estimatedYield:savBal.ey,
+          isMuni:false, isEst:savBal.isEst, detectedRate:savBal.detectedRate,
+        }];
+        extraItems.push({
+          filename: file.name,
+          detectedName: (() => { const nm=cNm||fnNm; return nm.includes('Cash Reserve')||nm.includes('Betterment') ? (cNm||'Betterment Cash Reserve') : (cNm||fnNm)+' – Cash'; })(),
+          detectedTax: detectedTx,
+          positions: savPos,
+          totalBalance: savBal.value,
+          source: 'pdf',
+          hasData: true,
+          detectedRate: savBal.detectedRate ?? pdfRate,
+          _subItem: true,
+        });
+      }
+      // Build the investing account item
+      const invPos = secPos.map(p => ({...p, detectedRate: null}));
+      extraItems.push({
+        filename: file.name,
+        detectedName: (() => { const nm=cNm||fnNm; return nm ? nm+' – Investing' : 'Investing Account'; })(),
+        detectedTax: detectedTx,
+        positions: invPos,
+        totalBalance: invPos.reduce((s,p)=>s+p.value, 0),
+        source: 'pdf',
+        hasData: true,
+        detectedRate: null,
+        _subItem: true,
+      });
+      // Return a container with multiple items
+      return {
+        filename: file.name,
+        _multiItems: extraItems,
+        hasData: true,
+        source: 'pdf',
+        positions: [...(savBal ? [{id:uid(),symbol:'SAV',description:savBal.description,assetClass:'Cash',subClass:savBal.subClass,value:savBal.value,yield:savBal.ey,estimatedYield:savBal.ey,isMuni:false,isEst:savBal.isEst,detectedRate:savBal.detectedRate}] : []), ...secPos],
+        totalBalance: (savBal?.value||0) + invPos.reduce((s,p)=>s+p.value,0),
+        detectedName: cNm||fnNm,
+        detectedTax: detectedTx,
+        detectedRate: pdfRate,
+      };
+    }
+
+    if(secPos.length > 0){
+      // Standard brokerage PDF — securities only
+      const docRate = extractAPY(fullText);
+      positions = secPos.map(p => ({
+        ...p,
+        yield: (docRate && p.assetClass === 'Cash') ? docRate : p.yield,
+        isEst: (docRate && p.assetClass === 'Cash') ? false : p.isEst,
+        detectedRate: docRate,
+      }));
+    } else {
+      // ── Savings/bank statement — extract balance + APY ──
+      if(balances.length > 0){
+        // Use the balance with the highest value (most likely the account total)
+        const best = balances.reduce((a,b) => b.value > a.value ? b : a, balances[0]);
+        positions.push({
+          id:uid(),
+          symbol: best.subClass.includes('Checking') ? 'CHK'
+                : best.subClass.includes('CD')       ? 'CD'
+                : best.subClass.includes('Market')   ? 'MMF'
+                : 'SAV',
+          description: best.description,
+          assetClass: 'Cash',
+          subClass: best.subClass,
+          value: best.value,
+          yield: best.ey,
+          estimatedYield: best.ey,
+          isMuni: false,
+          isEst: best.isEst,
+          detectedRate: best.detectedRate,
+        });
+        if(pdfRate) detectedRateForReview = pdfRate;
+      }
+    }
+  }
+
+  // Detect from content (overrides filename if more specific)
+  const {tx:cTx, nm:cNm} = detectContent(contentText);
+  const detectedTx = cTx || fnTx;
+  const detectedNm = cNm || fnNm;
+  const totalBalance = positions.reduce((s,p)=>s+p.value,0);
+
+  // Collect the best detected rate from any position in the file
+  const anyRate = detectedRateForReview
+    || positions.find(p=>p.detectedRate)?.detectedRate
+    || null;
+
+  return {
+    filename: file.name,
+    detectedName: detectedNm,
+    detectedTax: detectedTx,
+    positions,
+    totalBalance,
+    source: ext,
+    hasData: positions.length>0,
+    detectedRate: anyRate,   // APY/interest rate found in the document
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// FILE HANDLING & PROCESSING PIPELINE
+// ─────────────────────────────────────────────────────────────────────
+function onDragOver(e){e.preventDefault();document.getElementById('upload-zone').classList.add('drag-over');}
+function onDragLeave(){document.getElementById('upload-zone').classList.remove('drag-over');}
+function onDrop(e){e.preventDefault();document.getElementById('upload-zone').classList.remove('drag-over');handleFileList(Array.from(e.dataTransfer.files));}
+function handleFiles(e){handleFileList(Array.from(e.target.files));e.target.value='';}
+
+async function handleFileList(files) {
+  // Filter to only supported file types
+  const supported = files.filter(f=>/\.(csv|xlsx|xls|pdf)$/i.test(f.name));
+  if(!supported.length){toast('No supported files found (CSV, XLSX, PDF)','err');return;}
+
+  reviewQueue = [];
+  reviewIdx = 0;
+  procItems = supported.map(f=>({name:f.name,status:'queued',result:null}));
+  renderProcStatus();
+
+  for(let i=0;i<supported.length;i++){
+    procItems[i].status='processing';
+    renderProcStatus();
+    try{
+      const result = await parseFile(supported[i]);
+      procItems[i].status='done';
+      procItems[i].result=result;
+      // Multi-account PDFs return _multiItems — expand each into its own review item
+      if(result._multiItems && result._multiItems.length > 0){
+        result._multiItems.forEach(item => reviewQueue.push(item));
+      } else {
+        reviewQueue.push(result);
+      }
+    } catch(e){
+      console.error(e);
+      procItems[i].status='error';
+      // Still push to review with empty positions
+      reviewQueue.push({
+        filename:supported[i].name,
+        detectedName:detectFilename(supported[i].name).nm,
+        detectedTax:detectFilename(supported[i].name).tx,
+        positions:[],totalBalance:0,source:'error',hasData:false
+      });
+    }
+    renderProcStatus();
+  }
+  // All done — start review flow
+  setTimeout(()=>showNextReview(),400);
+}
+
+function renderProcStatus(){
+  const el = document.getElementById('proc-status');
+  if(!procItems.length){el.style.display='none';return;}
+  el.style.display='block';
+  const icons={queued:'⏸️',processing:'<span class="spin"></span>',done:'✅',error:'⚠️'};
+  const done = procItems.filter(p=>p.status==='done'||p.status==='error').length;
+  el.innerHTML=`<div class="proc-card">
+    <div class="proc-hdr">
+      <span class="proc-title">Processing Files — ${done} of ${procItems.length} complete</span>
+      <span style="font-size:12px;color:var(--blue-d)">${done===procItems.length?'✅ All done':'⏳ Please wait…'}</span>
+    </div>
+    ${procItems.map(p=>{
+      const res=p.result;
+      const hint = p.status==='done'&&res
+        ? (res.hasData
+            ? (res._multiItems
+                ? `${res._multiItems.length} accounts detected · ${fc(res.totalBalance)}`
+                : `${res.positions.length} position${res.positions.length!==1?'s':''} · ${fc(res.totalBalance)}`)
+            : '⚠️ No positions found — will still review')
+        : p.status==='error' ? 'Parse error' : p.status==='processing' ? 'Parsing…' : 'Waiting…';
+      return `<div class="proc-item">
+        <div class="proc-status">${icons[p.status]}</div>
+        <div class="proc-filename" title="${p.name}">${p.name}</div>
+        <div class="proc-result">${hint}</div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// REVIEW MODAL
+// ─────────────────────────────────────────────────────────────────────
+function showNextReview(){
+  if(reviewIdx>=reviewQueue.length){
+    document.getElementById('review-modal').style.display='none';
+    renderIngestion();
+    if(S.accounts.length) toast(`✅ ${S.accounts.length} account${S.accounts.length!==1?'s':''} added`);
+    return;
+  }
+  const item = reviewQueue[reviewIdx];
+  // For sub-items (multiple accounts from one PDF), show both filename and account name
+  document.getElementById('rv-filename').textContent = item._subItem
+    ? `${item.filename} › ${item.detectedName || 'Account'}`
+    : item.filename;
+  document.getElementById('rv-name').value = '';
+  document.getElementById('rv-tax').value = item.detectedTax || 'taxable';
+  document.getElementById('rv-progress').textContent = `Account ${reviewIdx+1} of ${reviewQueue.length}`;
+
+  // Summary pills
+  const taxPillCls = item.detectedTax==='tax-free'?'badge-free':item.detectedTax==='tax-deferred'?'badge-deferred':'badge-taxable';
+  const taxPillLbl = item.detectedTax==='tax-free'?'Tax-Free':item.detectedTax==='tax-deferred'?'Tax-Deferred':'Taxable';
+  // APY pill — green if found from document, amber if estimated
+  const apyPill = item.detectedRate != null
+    ? `<span class="badge badge-emerald" title="Interest rate detected directly from document">🎯 ${fp(item.detectedRate,2)} APY detected</span>`
+    : (item.positions.length===1 && item.positions[0].assetClass==='Cash')
+      ? `<span class="badge badge-taxable" title="Estimated yield — APY not found in document">~ ${fp(item.positions[0].yield,2)} estimated</span>`
+      : '';
+  document.getElementById('rv-summary').innerHTML = [
+    item.positions.length>0
+      ? `<span class="badge badge-taxable">${item.positions.length} position${item.positions.length!==1?'s':''}</span>`
+      : '<span class="badge" style="background:#fee2e2;color:#991b1b">No positions</span>',
+    item.totalBalance>0 ? `<span class="badge badge-free">${fc(item.totalBalance)}</span>` : '',
+    `<span class="badge" style="background:var(--surface2);color:var(--text3)">${item.source.toUpperCase()}</span>`,
+    `<span class="badge ${taxPillCls}">${taxPillLbl} detected</span>`,
+    apyPill,
+  ].filter(Boolean).join('');
+
+  // Preview positions
+  const prev = item.positions.slice(0,6);
+  const more = item.positions.length-6;
+  // For savings accounts: build a special info block showing balance + APY prominently
+  const isSavings = item.positions.length===1 && item.positions[0].assetClass==='Cash';
+  document.getElementById('rv-preview').innerHTML = prev.length===0
+    ? `<div class="alert alert-warning" style="margin-top:12px"><span>⚠️</span> No data could be extracted. Edit the name and tax treatment and click Add Account to add it manually.</div>`
+    : isSavings
+      ? `<div class="rv-preview">
+          <div class="rv-preview-hdr">Detected Account Details</div>
+          <div class="rv-row" style="justify-content:space-between;background:var(--emerald-l);border-radius:0;">
+            <div style="font-weight:700;color:var(--emerald-d)">Account Balance</div>
+            <div class="rv-val" style="font-size:16px;color:var(--emerald-d)">${fc(prev[0].value)}</div>
+          </div>
+          <div class="rv-row" style="justify-content:space-between;">
+            <div style="color:var(--text2)">Type</div>
+            <div><span class="chip chip-Cash">${prev[0].subClass}</span></div>
+          </div>
+          <div class="rv-row" style="justify-content:space-between;">
+            <div style="color:var(--text2)">Interest Rate / APY</div>
+            <div style="font-weight:700;color:${item.detectedRate?'var(--emerald-d)':'var(--amber)'}">
+              ${item.detectedRate ? `${fp(item.detectedRate,2)} <span style="font-size:11px;font-weight:400;color:var(--emerald-d)">✅ from document</span>` : `${fp(prev[0].yield,2)} <span style="font-size:11px;font-weight:400;color:var(--amber)">~ estimated</span>`}
+            </div>
+          </div>
+          <div class="rv-row" style="justify-content:space-between;">
+            <div style="color:var(--text2)">Projected Annual Income</div>
+            <div style="font-weight:700">${fc(prev[0].value * prev[0].yield / 100)}</div>
+          </div>
+        </div>`
+      : `<div class="rv-preview">
+          <div class="rv-preview-hdr">Detected Positions (preview)</div>
+          ${prev.map(p=>`<div class="rv-row">
+            <div class="rv-sym">${p.symbol}</div>
+            <div class="rv-desc">${p.description.slice(0,45)}</div>
+            <div><span class="chip chip-${p.assetClass}">${p.assetClass}</span></div>
+            <div class="rv-yield">${fp(p.yield)}${p.isEst?'~':''}</div>
+            <div class="rv-val">${fc(p.value)}</div>
+          </div>`).join('')}
+          ${more>0?`<div class="rv-row" style="color:var(--text3);font-style:italic">…and ${more} more</div>`:''}
+        </div>`;
+
+  document.getElementById('review-modal').style.display='flex';
+}
+
+function confirmReview(){
+  const item = reviewQueue[reviewIdx];
+  const name = document.getElementById('rv-name').value.trim() || 'Unnamed Account';
+  const tax  = document.getElementById('rv-tax').value;
+  S.accounts.push({
+    id:uid(), name, taxTreatment:tax,
+    positions: item.positions,
+    totalBalance: item.totalBalance,
+    source: item.source
+  });
+  reviewIdx++;
+  showNextReview();
+  // Once all accounts in queue confirmed — save or prompt PIN setup
+  if (reviewIdx >= reviewQueue.length) {
+    if (S.sessionPin) {
+      saveSession(); // Already have PIN → auto-save silently
+    } else if (!localStorage.getItem(_SKEY)) {
+      // First time — invite user to set a PIN
+      setTimeout(showPinSetup, 400);
+    }
+    updateNavSession();
+  }
+}
+
+function skipReview(){
+  reviewIdx++;
+  showNextReview();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────
+function calcStats(){
+  if(!S.accounts.length) return null;
+  let tv=0, acBrk={Stocks:0,Bonds:0,Cash:0,Mixed:0}, scBrk={};
+  let txBrk={taxable:0,'tax-deferred':0,'tax-free':0};
+  let incBkt={taxable:0,'tax-deferred':0,'tax-free':0};
+  let incByAcct=[], allPos=[], wyn=0;
+
+  for(const acc of S.accounts){
+    let ai=0;
+    for(const p of acc.positions){
+      tv+=p.value;
+      // Look-through: for funds with known stock/bond split (balanced, allocation, covered-call),
+      // distribute their value into the underlying asset classes instead of "Mixed"
+      if(p.lt){
+        for(const [ltAc, ltFrac] of Object.entries(p.lt)){
+          acBrk[ltAc]=(acBrk[ltAc]||0)+p.value*ltFrac;
+        }
+      } else {
+        acBrk[p.assetClass]=(acBrk[p.assetClass]||0)+p.value;
+      }
+      scBrk[p.subClass]=(scBrk[p.subClass]||0)+p.value;
+      const inc=p.value*(p.yield/100);
+      wyn+=p.value*p.yield; ai+=inc;
+      if(acc.taxTreatment==='tax-free') incBkt['tax-free']+=inc;
+      else if(acc.taxTreatment==='tax-deferred') incBkt['tax-deferred']+=inc;
+      else{ if(p.isMuni) incBkt['tax-free']+=inc; else incBkt['taxable']+=inc; }
+      allPos.push({...p,accountId:acc.id,accountName:acc.name,taxTreatment:acc.taxTreatment});
+    }
+    txBrk[acc.taxTreatment]=(txBrk[acc.taxTreatment]||0)+acc.totalBalance;
+    incByAcct.push({id:acc.id,name:acc.name,taxTreatment:acc.taxTreatment,income:ai,value:acc.totalBalance});
+  }
+  incByAcct.sort((a,b)=>b.income-a.income);
+  const wy = tv>0?wyn/tv:0;
+  const ti = Object.values(incBkt).reduce((s,v)=>s+v,0);
+  const scSorted = Object.entries(scBrk).sort((a,b)=>b[1]-a[1]);
+  return {tv,acBrk,scBrk:scSorted,txBrk,incBkt,incByAcct,wy,ti,allPos,
+          na:S.accounts.length,np:allPos.length};
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// TAB NAVIGATION
+// ─────────────────────────────────────────────────────────────────────
+function switchTab(tab){
+  S.activeTab=tab;
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('panel-'+tab).classList.add('active');
+  document.getElementById('ntab-'+tab).classList.add('active');
+  renderActive();
+}
+function renderActive(){
+  const t=S.activeTab;
+  if(t==='ingestion') renderIngestion();
+  if(t==='allocation') renderAllocation();
+  if(t==='income') renderIncome();
+  if(t==='optimizer') renderOptimizer();
+  if(t==='planner') renderPlanner();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// RENDER: INGESTION
+// ─────────────────────────────────────────────────────────────────────
+function renderIngestion(){
+  const list = document.getElementById('accounts-list');
+  const empty = document.getElementById('empty-accounts');
+  if(!S.accounts.length){list.innerHTML='';empty.style.display='block';return;}
+  empty.style.display='none';
+  const txBadge={taxable:'badge-taxable','tax-deferred':'badge-deferred','tax-free':'badge-free'};
+  const txLabel={taxable:'Taxable','tax-deferred':'Tax-Deferred','tax-free':'Tax-Free'};
+  list.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+    <div style="font-weight:700;font-size:15px;">${S.accounts.length} Account${S.accounts.length!==1?'s':''} · ${fc(S.accounts.reduce((s,a)=>s+a.totalBalance,0))} Total</div>
+    <button class="btn btn-ghost btn-sm" onclick="clearAll()">🗑 Clear All</button>
+  </div>`
+  + S.accounts.map(acc=>`
+    <div class="acct-card">
+      <div class="acct-hdr">
+        <div style="display:flex;align-items:center;gap:9px;">
+          <div class="acct-name">${acc.name}</div>
+          <span class="badge ${txBadge[acc.taxTreatment]}">${txLabel[acc.taxTreatment]}</span>
+          <span style="font-size:11px;color:var(--text3)">${acc.positions.length} position${acc.positions.length!==1?'s':''}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="font-weight:800;font-size:14px;">${fc(acc.totalBalance)}</div>
+          <button style="background:none;border:none;cursor:pointer;font-size:16px;color:var(--text3);" onclick="togglePos('${acc.id}')" id="ep-${acc.id}">▾</button>
+          <button class="btn btn-ghost btn-sm" onclick="delAcct('${acc.id}')">🗑️</button>
+        </div>
+      </div>
+      <div class="acct-positions" id="pos-${acc.id}">
+        <table class="tbl">
+          <thead><tr><th>Symbol</th><th>Description</th><th>Class</th><th>Sub-Class</th><th class="tr">Yield</th><th class="tr">Value</th></tr></thead>
+          <tbody>${acc.positions.map(p=>`<tr>
+            <td><strong>${p.symbol}</strong></td>
+            <td style="color:var(--text2)">${p.description.slice(0,52)}</td>
+            <td><span class="chip chip-${p.assetClass}">${p.assetClass}</span></td>
+            <td style="color:var(--text3);font-size:12px">${p.subClass}</td>
+            <td class="tr">${fp(p.yield)}${p.isEst?'<sup style="color:var(--amber)">~</sup>':''}</td>
+            <td class="tr"><strong>${fc(p.value)}</strong></td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>`).join('');
+}
+
+function togglePos(id){
+  const el=document.getElementById('pos-'+id);
+  const btn=document.getElementById('ep-'+id);
+  el.classList.toggle('open');
+  btn.textContent=el.classList.contains('open')?'▴':'▾';
+}
+function delAcct(id){S.accounts=S.accounts.filter(a=>a.id!==id);S.optimizerResult=null;S.plannerResult=null;renderIngestion();}
+function clearAll(){if(confirm('Remove all accounts?')){S.accounts=[];S.optimizerResult=null;S.plannerResult=null;renderIngestion();}}
+
+// ─────────────────────────────────────────────────────────────────────
+// RENDER: ALLOCATION
+// ─────────────────────────────────────────────────────────────────────
+const AC_COLORS={Stocks:'#3b82f6',Bonds:'#7c3aed',Cash:'#10b981',Mixed:'#f59e0b'};
+const TX_COLORS={taxable:'#f59e0b','tax-deferred':'#7c3aed','tax-free':'#0ea5e9'};
+function scAC(sc){
+  const m={
+    'Large Cap US':'Stocks','Total Market US':'Stocks','Large Cap Growth':'Stocks','Large Cap Value':'Stocks',
+    'Small Cap US':'Stocks','International':'Stocks','Developed Markets':'Stocks','Emerging Markets':'Stocks',
+    'Dividend':'Stocks','High Dividend':'Stocks','Dividend Growth':'Stocks','REIT':'Stocks','Commodity':'Stocks',
+    'Equity':'Stocks','Mega Cap Growth':'Stocks','Dividend Aristocrat':'Stocks','Equal Weight US':'Stocks',
+    'Total Bond Market':'Bonds','Short Treasury':'Bonds','Intermediate Treasury':'Bonds','Long Treasury':'Bonds',
+    'TIPS':'Bonds','Muni Bonds':'Bonds','High Yield':'Bonds','EM Bond':'Bonds','CLO AAA':'Bonds','CLO BBB':'Bonds',
+    'Float Rate Corp':'Bonds','International Bond':'Bonds','Short Corp Bond':'Bonds','Intermediate Corp':'Bonds',
+    'Long Corp Bond':'Bonds','Fixed Income':'Bonds',
+    'Money Market':'Cash','Float Rate Treasury':'Cash','Cash Reserve':'Cash','Savings Account':'Cash',
+    'Checking Account':'Cash','Certificate of Deposit':'Cash',
+    'Covered Call':'Mixed','Balanced':'Mixed','Moderate Allocation':'Mixed','Aggressive Allocation':'Mixed',
+  };
+  return m[sc]||'Stocks';
+}
+
+function renderAllocation(){
+  const el=document.getElementById('allocation-content');
+  const st=calcStats();
+  if(!st){el.innerHTML=emptyState('📊','No Portfolio Data','Upload statements in Accounts tab first.');return;}
+  const {tv,acBrk,scBrk,txBrk}=st;
+
+  el.innerHTML=`
+  <div class="grid g4" style="margin-bottom:18px;">
+    <div class="metric"><div class="metric-icon">💰</div><div class="metric-label">Total Portfolio</div><div class="metric-value" style="color:var(--blue)">${fc(tv)}</div><div class="metric-sub">${st.na} accounts · ${st.np} positions</div></div>
+    <div class="metric"><div class="metric-icon">📈</div><div class="metric-label">Stocks</div><div class="metric-value" style="color:#3b82f6">${fp((acBrk.Stocks||0)/tv*100)}</div><div class="metric-sub">${fc(acBrk.Stocks||0)}</div></div>
+    <div class="metric"><div class="metric-icon">🏦</div><div class="metric-label">Bonds</div><div class="metric-value" style="color:var(--purple)">${fp((acBrk.Bonds||0)/tv*100)}</div><div class="metric-sub">${fc(acBrk.Bonds||0)}</div></div>
+    <div class="metric"><div class="metric-icon">💵</div><div class="metric-label">Cash</div><div class="metric-value" style="color:var(--emerald)">${fp((acBrk.Cash||0)/tv*100)}</div><div class="metric-sub">${fc(acBrk.Cash||0)}</div></div>
+  </div>
+  <div class="grid g32" style="margin-bottom:18px;">
+    <div class="card">
+      <div class="card-hdr"><div class="card-title">📊 Asset Class Breakdown</div></div>
+      <div class="card-body">
+        <div class="donut-wrap">
+          <div class="donut-canvas-wrap">
+            <canvas id="donut-chart" width="160" height="160"></canvas>
+            <div class="donut-center"><div class="donut-center-val">${fc(tv)}</div><div class="donut-center-label">Portfolio</div></div>
+          </div>
+          <div class="donut-legend">
+            ${['Stocks','Bonds','Cash','Mixed'].filter(k=>acBrk[k]>0).map(k=>`
+              <div class="legend-item">
+                <div class="legend-left"><div class="legend-dot" style="background:${AC_COLORS[k]}"></div>${k}</div>
+                <div><strong>${fp(acBrk[k]/tv*100)}</strong> <span style="font-size:11px;color:var(--text3)">${fc(acBrk[k])}</span></div>
+              </div>`).join('')}
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-hdr"><div class="card-title">🔍 Sub-Class Breakdown</div></div>
+      <div class="card-body">
+        ${scBrk.slice(0,10).map(([sc,v])=>`<div class="pr-row">
+          <div class="pr-label">${sc}</div>
+          <div class="pr-track"><div class="pr-fill" style="width:${clamp(v/tv*100,0,100)}%;background:${AC_COLORS[scAC(sc)]||'#94a3b8'}"></div></div>
+          <div class="pr-pct">${fp(v/tv*100)}</div>
+          <div class="pr-val">${fc(v)}</div>
+        </div>`).join('')}
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-hdr"><div class="card-title">🏛️ Account Breakdown</div></div>
+    <div class="card-body">
+      ${S.accounts.map(a=>`<div class="pr-row">
+        <div class="pr-label" style="min-width:170px">${a.name}</div>
+        <div class="pr-track"><div class="pr-fill" style="width:${clamp(a.totalBalance/tv*100,0,100)}%;background:${TX_COLORS[a.taxTreatment]}"></div></div>
+        <div class="pr-pct">${fp(a.totalBalance/tv*100)}</div>
+        <div class="pr-val">${fc(a.totalBalance)}</div>
+      </div>`).join('')}
+    </div>
+  </div>`;
+
+  setTimeout(()=>{
+    const canvas=document.getElementById('donut-chart');
+    if(!canvas) return;
+    if(allocChart){allocChart.destroy();allocChart=null;}
+    const labels=[],data=[],colors=[];
+    for(const k of ['Stocks','Bonds','Cash','Mixed']) if(acBrk[k]>0){labels.push(k);data.push(acBrk[k]);colors.push(AC_COLORS[k]);}
+    allocChart=new Chart(canvas,{type:'doughnut',data:{labels,datasets:[{data,backgroundColor:colors,borderWidth:2,borderColor:'#fff',hoverOffset:5}]},
+      options:{cutout:'68%',plugins:{legend:{display:false},tooltip:{callbacks:{label:i=>`${i.label}: ${fc(i.raw)} (${fp(i.raw/tv*100)})`}}},animation:{duration:450}}});
+  },50);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// RENDER: INCOME
+// ─────────────────────────────────────────────────────────────────────
+function renderIncome(){
+  const el=document.getElementById('income-content');
+  const st=calcStats();
+  if(!st){el.innerHTML=emptyState('💵','No Portfolio Data','Upload statements in Accounts tab first.');return;}
+  const {ti,incBkt,wy,incByAcct,tv}=st;
+
+  el.innerHTML=`
+  <div class="grid g4" style="margin-bottom:18px;">
+    <div class="metric" style="border-top:3px solid var(--blue)"><div class="metric-icon">💰</div><div class="metric-label">Projected 12-Month Income</div><div class="metric-value" style="color:var(--blue)">${fc(ti)}</div><div class="metric-sub">Based on current holdings</div></div>
+    <div class="metric" style="border-top:3px solid var(--sky)"><div class="metric-icon">📊</div><div class="metric-label">Weighted Avg Yield</div><div class="metric-value" style="color:var(--sky)">${fp(wy,2)}</div><div class="metric-sub">On ${fc(tv)} total</div></div>
+    <div class="metric" style="border-top:3px solid var(--emerald)"><div class="metric-icon">🌿</div><div class="metric-label">Tax-Free Income</div><div class="metric-value" style="color:var(--emerald)">${fc(incBkt['tax-free'])}</div><div class="metric-sub">${ti>0?fp(incBkt['tax-free']/ti*100):'0%'} of total</div></div>
+    <div class="metric" style="border-top:3px solid var(--rose)"><div class="metric-icon">💸</div><div class="metric-label">Taxable Income</div><div class="metric-value" style="color:var(--rose)">${fc(incBkt.taxable)}</div><div class="metric-sub">${ti>0?fp(incBkt.taxable/ti*100):'0%'} of total</div></div>
+  </div>
+  <div class="grid g2">
+    <div class="card">
+      <div class="card-hdr"><div class="card-title">🧾 Income by Tax Bucket</div></div>
+      <div class="card-body">
+        ${bkt('🌿 Tax-Free (Roth/HSA + Munis)',incBkt['tax-free'],ti,'var(--sky)','Roth IRA, HSA, 529, plus Municipal Bonds in taxable. No federal income tax.')}
+        <hr class="dv">
+        ${bkt('🏛️ Tax-Deferred (IRA/401k)',incBkt['tax-deferred'],ti,'var(--purple)','Traditional IRA & 401(k). Taxed as ordinary income at withdrawal.')}
+        <hr class="dv">
+        ${bkt('💸 Taxable (Brokerage/Bank)',incBkt.taxable,ti,'var(--amber)','Standard brokerage, savings, checking. Qualified dividends at cap-gains rates.')}
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-hdr"><div class="card-title">🏆 Top Income Sources</div></div>
+      <div class="card-body">
+        <table class="tbl">
+          <thead><tr><th>Account</th><th>Type</th><th class="tr">Annual Income</th><th class="tr">Yield</th></tr></thead>
+          <tbody>${incByAcct.slice(0,8).map(a=>{
+            const tb={taxable:'badge-taxable','tax-deferred':'badge-deferred','tax-free':'badge-free'};
+            const tl={taxable:'Taxable','tax-deferred':'Deferred','tax-free':'Tax-Free'};
+            return `<tr><td><strong>${a.name}</strong></td><td><span class="badge ${tb[a.taxTreatment]}">${tl[a.taxTreatment]}</span></td><td class="tr"><strong>${fc(a.income)}</strong></td><td class="tr">${fp(a.value>0?a.income/a.value*100:0,2)}</td></tr>`;
+          }).join('')}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>`;
+}
+function bkt(title,inc,total,color,desc){
+  const pct=total>0?inc/total*100:0;
+  return `<div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px">
+      <div style="font-weight:600;font-size:13px">${title}</div>
+      <div style="font-weight:800;font-size:15px;color:${color}">${fc(inc)}</div>
+    </div>
+    <div class="pr-track" style="height:9px;margin-bottom:7px">
+      <div class="pr-fill" style="width:${clamp(pct,0,100)}%;background:${color}"></div>
+    </div>
+    <div style="font-size:12px;color:var(--text3)">${fp(pct)} of total · ${desc}</div>
+  </div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// RENDER: OPTIMIZER
+// ─────────────────────────────────────────────────────────────────────
+function renderOptimizer(){
+  const el=document.getElementById('optimizer-content');
+  const st=calcStats();
+  if(!st){el.innerHTML=emptyState('⚖️','No Portfolio Data','Upload statements first, then build a trade plan.');return;}
+  const {acBrk,tv}=st;
+  const cs=v=>fp(v/tv*100);
+  const pr=S.optimizerResult;
+
+  el.innerHTML=`
+  <div class="grid g12">
+    <div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-hdr"><div class="card-title">🎯 Target Allocation</div></div>
+        <div class="card-body">
+          <div class="alert alert-info" style="margin-bottom:12px">Current: Stocks ${cs(acBrk.Stocks||0)} · Bonds ${cs(acBrk.Bonds||0)} · Cash ${cs(acBrk.Cash||0)}</div>
+          ${['stocks','bonds','cash'].map(k=>`<div class="form-group">
+            <label class="form-label">Target ${k.charAt(0).toUpperCase()+k.slice(1)} (%)</label>
+            <div class="inp-sfx"><input class="input" id="opt-${k}" type="number" min="0" max="100" value="${pr?pr.inputs[k]:k==='stocks'?60:k==='bonds'?30:10}" oninput="optSumUpdate()"><span class="inp-sfx-lbl">%</span></div>
+          </div>`).join('')}
+          <div id="opt-sum-msg" style="font-size:12px;margin-bottom:12px"></div>
+          <div class="toggle-row">
+            <div><div class="toggle-label">Exclude Tax-Free Accounts</div><div class="toggle-sub">Preserve Roth/HSA balances</div></div>
+            <div class="toggle" id="opt-etf" onclick="toggleOptTF()"></div>
+          </div>
+          <div style="margin-top:14px"><button class="btn btn-primary" style="width:100%" onclick="runOptimizer()">⚡ Generate Trade Plan</button></div>
+        </div>
+      </div>
+    </div>
+    <div id="opt-results">${pr?renderOptResults(pr):'<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)"><div style="font-size:38px;margin-bottom:10px">⚖️</div><div style="font-weight:600;color:var(--text2)">Configure targets on the left</div></div></div>'}</div>
+  </div>`;
+  optSumUpdate();
+  if(pr) document.getElementById('opt-etf').classList.toggle('on',pr.inputs.excludeTF);
+}
+
+function toggleOptTF(){optExTF=!optExTF;document.getElementById('opt-etf').classList.toggle('on',optExTF);}
+function optSumUpdate(){
+  const s=(+document.getElementById('opt-stocks').value||0)+(+document.getElementById('opt-bonds').value||0)+(+document.getElementById('opt-cash').value||0);
+  const el=document.getElementById('opt-sum-msg');if(!el)return;
+  el.innerHTML=`Sum: <strong style="color:${s===100?'var(--emerald)':'var(--rose)'}">${s}%</strong> ${s===100?'✅':'(must equal 100%)'}`;
+}
+
+function runOptimizer(){
+  const stocks=+document.getElementById('opt-stocks').value||0;
+  const bonds=+document.getElementById('opt-bonds').value||0;
+  const cash=+document.getElementById('opt-cash').value||0;
+  if(stocks+bonds+cash!==100){toast('Targets must sum to 100%','err');return;}
+  const r=computeOpt(stocks,bonds,cash,optExTF);
+  S.optimizerResult=r;
+  document.getElementById('opt-results').innerHTML=renderOptResults(r);
+}
+
+function computeOpt(ts,tb,tc,exTF){
+  const st=calcStats(); const tv=st.tv; const ac=st.acBrk;
+  const mx0=ac.Mixed||0;
+  const curS=(ac.Stocks||0)+mx0*.5, curB=(ac.Bonds||0)+mx0*.3, curC=(ac.Cash||0)+mx0*.2;
+  const tarS=tv*ts/100, tarB=tv*tb/100, tarC=tv*tc/100;
+  const dS=tarS-curS, dB=tarB-curB, dC=tarC-curC;
+  let allPos=[...st.allPos].filter(p=>!exTF||p.taxTreatment!=='tax-free').sort((a,b)=>a.yield-b.yield);
+  const sells=[],buys=[];
+  const usedPos=new Set();
+  function pickSells(ac2,amt){
+    let rem=amt;
+    for(const p of allPos.filter(x=>x.assetClass===ac2&&!usedPos.has(x.id))){
+      if(rem<=0)break;
+      const sa=Math.min(rem,p.value);
+      sells.push({posId:p.id,symbol:p.symbol,description:p.description,assetClass:p.assetClass,
+        yield:p.yield,accountName:p.accountName,taxTreatment:p.taxTreatment,amount:sa});
+      usedPos.add(p.id); rem-=sa;
+    }
+  }
+  if(dS<0) pickSells('Stocks',Math.abs(dS));
+  if(dB<0) pickSells('Bonds',Math.abs(dB));
+  if(dC<0) pickSells('Cash',Math.abs(dC));
+  const byTT=order=>{const g={'tax-free':[],'taxable':[],'tax-deferred':[]};S.accounts.filter(a=>!exTF||a.taxTreatment!=='tax-free').forEach(a=>g[a.taxTreatment].push(a));return order.flatMap(t=>g[t]);};
+  function addBuy(ac2,amt,order,rat){
+    if(amt<=0)return;
+    const accts=byTT(order); if(!accts.length)return;
+    const acc=accts[0];
+    const sug=(BUY_SIGS[ac2]?.[acc.taxTreatment]||[])[0]||{t:'—',d:'Select fund'};
+    buys.push({assetClass:ac2,amount:amt,accountId:acc.id,accountName:acc.name,taxTreatment:acc.taxTreatment,suggestion:sug,rationale:rat});
+  }
+  if(dS>0) addBuy('Stocks',dS,['tax-free','taxable','tax-deferred'],'Best compounding in tax-free accounts');
+  if(dB>0) addBuy('Bonds',dB,['tax-deferred','taxable','tax-free'],'Bond income sheltered in tax-deferred');
+  if(dC>0) addBuy('Cash',dC,['taxable','tax-free','tax-deferred'],'Cash stays liquid in taxable');
+  const hasTaxGain=sells.some(s=>s.taxTreatment==='taxable');
+  return {sells,buys,dS,dB,dC,tv,ts,tb,tc,curS,curB,curC,hasTaxGain,inputs:{stocks:ts,bonds:tb,cash:tc,excludeTF:exTF}};
+}
+
+function renderOptResults(r){
+  const sellsHtml=r.sells.length===0?'<div style="color:var(--text3);padding:6px 0">✅ No sells needed</div>':
+    r.sells.map(s=>`<div class="trade-item trade-sell">
+      <div style="flex:1"><div style="font-weight:700">SELL ${s.symbol} <span class="chip chip-${s.assetClass}">${s.assetClass}</span></div>
+      <div style="font-size:12px;color:var(--text2)">${s.description.slice(0,50)} · Yield: ${fp(s.yield)}</div></div>
+      <div style="text-align:right"><div style="font-weight:700;color:var(--rose)">${fc(s.amount)}</div>
+      <div style="font-size:11px;color:var(--text3)">${s.accountName}${s.taxTreatment==='taxable'?' · ⚠️ Taxable':''}</div></div>
+    </div>`).join('');
+  const buysHtml=r.buys.length===0?'<div style="color:var(--text3);padding:6px 0">✅ No buys needed</div>':
+    r.buys.map(b=>`<div class="trade-item trade-buy">
+      <div style="flex:1"><div style="font-weight:700">BUY ${b.suggestion.t} <span class="chip chip-${b.assetClass}">${b.assetClass}</span></div>
+      <div style="font-size:12px;color:var(--text2)">${b.suggestion.d} · ${b.rationale}</div></div>
+      <div style="text-align:right"><div style="font-weight:700;color:var(--emerald)">${fc(b.amount)}</div>
+      <div style="font-size:11px;color:var(--text3)">${b.accountName}</div></div>
+    </div>`).join('');
+  return `
+  ${r.hasTaxGain?'<div class="alert alert-warning">⚠️ <strong>Taxable Capital Gains:</strong> One or more sells are in a taxable brokerage. Consider tax-loss harvesting or waiting for long-term treatment (>12 months).</div>':''}
+  <div class="card" style="margin-bottom:14px"><div class="card-hdr"><div class="card-title" style="color:var(--rose)">🔴 Sells</div></div><div class="card-body">${sellsHtml}</div></div>
+  <div class="card" style="margin-bottom:14px"><div class="card-hdr"><div class="card-title" style="color:var(--emerald)">🟢 Buys</div></div><div class="card-body">${buysHtml}</div></div>
+  <div class="card"><div class="card-hdr"><div class="card-title">📝 Rationale</div></div><div class="card-body"><div class="rationale">
+    <p><strong>The Math:</strong> Current: ${fp(r.curS/r.tv*100)} stocks / ${fp(r.curB/r.tv*100)} bonds / ${fp(r.curC/r.tv*100)} cash → Target: ${r.ts}% / ${r.tb}% / ${r.tc}%. Deltas: Stocks ${r.dS>=0?'+':''}${fc(r.dS)}, Bonds ${r.dB>=0?'+':''}${fc(r.dB)}, Cash ${r.dC>=0?'+':''}${fc(r.dC)}.</p>
+    <p><strong>Location Rules Applied:</strong> Stocks → Tax-Free first (max compounding). Bonds → Tax-Deferred first (shelter ordinary income). Cash → Taxable first (most flexible).</p>
+    <p><strong>Sell Priority:</strong> Lowest-yielding positions sold first — preserves high-income generators and minimizes drag.</p>
+    ${r.inputs.excludeTF?'<p><strong>Roth/HSA Preserved:</strong> Excluded from all buy and sell logic per your constraint.</p>':''}
+  </div></div></div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// RENDER: INCOME PLANNER
+// ─────────────────────────────────────────────────────────────────────
+function renderPlanner(){
+  const el=document.getElementById('planner-content');
+  const st=calcStats();
+  if(!st){el.innerHTML=emptyState('🎯','No Portfolio Data','Upload statements first, then plan your income strategy.');return;}
+  const ib=st.incBkt;
+  const pr=S.plannerResult;
+  const tp=S.taxProfile||{state:'CA',bracket:'37',filing:'MFJ'};
+  const stateOpts=Object.entries(STATE_MUNI_DB).sort((a,b)=>a[1].name.localeCompare(b[1].name))
+    .map(([k,v])=>`<option value="${k}" ${tp.state===k?'selected':''}>${v.name} (${v.rate>0?v.rate+'%':'No Income Tax'})</option>`).join('');
+
+  el.innerHTML=`
+  <div class="grid g12">
+    <div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-hdr"><div class="card-title">🏛️ Your Tax Profile</div></div>
+        <div class="card-body">
+          <div class="form-group">
+            <label class="form-label">State of Residence</label>
+            <select class="input" id="pl-state" onchange="onTaxProfileChange()">${stateOpts}</select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Federal Marginal Bracket</label>
+            <select class="input" id="pl-bracket" onchange="onTaxProfileChange()">
+              ${[10,12,22,24,32,35,37].map(r=>`<option value="${r}" ${tp.bracket==r?'selected':''}>${r}% bracket</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Filing Status</label>
+            <select class="input" id="pl-filing" onchange="onTaxProfileChange()">
+              <option value="MFJ" ${tp.filing==='MFJ'?'selected':''}>Married Filing Jointly</option>
+              <option value="Single" ${tp.filing==='Single'?'selected':''}>Single</option>
+              <option value="MFS" ${tp.filing==='MFS'?'selected':''}>Married Filing Separately</option>
+              <option value="HOH" ${tp.filing==='HOH'?'selected':''}>Head of Household</option>
+            </select>
+          </div>
+          <div id="pl-tey-preview" style="background:var(--blue-l);border-radius:var(--r-sm);padding:10px 12px;font-size:12px;color:var(--blue-d)"></div>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-hdr"><div class="card-title">🎯 Income Targets</div></div>
+        <div class="card-body">
+          <div class="alert alert-info" style="margin-bottom:12px">Current: Tax-Free ${fc(ib['tax-free'])} · Deferred ${fc(ib['tax-deferred'])} · Taxable ${fc(ib.taxable)}</div>
+          ${[['free','Tax-Free (Roth/HSA + Munis)'],['deferred','Tax-Deferred (IRA/401k)'],['taxable','Taxable (Brokerage)']].map(([k,lbl])=>`<div class="form-group">
+            <label class="form-label">Target ${lbl} ($/yr)</label>
+            <input class="input" id="pl-${k}" type="number" min="0" placeholder="e.g. 5000" value="${pr?pr.inputs[k]:''}">
+          </div>`).join('')}
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-hdr"><div class="card-title">🔧 Strategies</div></div>
+        <div class="card-body">
+          ${[['reallocate','Asset Location Fix','Move assets to optimal account types'],
+             ['capital','New Capital','Calculate deposits needed to hit targets'],
+             ['roth','Roth Conversion','Convert Tax-Deferred → Tax-Free income']].map(([k,lbl,sub])=>`
+            <div class="toggle-row"><div><div class="toggle-label">${lbl}</div><div class="toggle-sub">${sub}</div></div>
+            <div class="toggle ${planStrategies.has(k)?'on':''}" id="pl-strat-${k}" onclick="togglePlanStrat('${k}')"></div></div>`).join('')}
+          <div class="toggle-row"><div><div class="toggle-label">Exclude Tax-Free Accounts</div><div class="toggle-sub">Analyze taxable + deferred only</div></div>
+          <div class="toggle ${planExTF?'on':''}" id="pl-etf" onclick="togglePlanTF()"></div></div>
+          <div style="margin-top:14px"><button class="btn btn-primary" style="width:100%" onclick="runPlanner()">⚡ Generate Income Strategy</button></div>
+        </div>
+      </div>
+    </div>
+    <div id="plan-results">${pr?renderPlanResults(pr):'<div class="card"><div style="padding:40px;text-align:center;color:var(--text3)"><div style="font-size:38px;margin-bottom:10px">💡</div><div style="font-weight:600;color:var(--text2)">Set your tax profile + targets</div><div style="margin-top:6px;font-size:13px">Get personalized, granular strategies with Tax-Equivalent Yield calculations</div></div></div>'}</div>
+  </div>`;
+  updateTEYPreview();
+}
+
+function onTaxProfileChange(){
+  const s=document.getElementById('pl-state')?.value||'CA';
+  const b=document.getElementById('pl-bracket')?.value||'37';
+  const f=document.getElementById('pl-filing')?.value||'MFJ';
+  S.taxProfile={state:s,bracket:b,filing:f};
+  updateTEYPreview();
+}
+
+function updateTEYPreview(){
+  const el=document.getElementById('pl-tey-preview');if(!el)return;
+  const stateCode=document.getElementById('pl-state')?.value||'CA';
+  const fedRate=parseFloat(document.getElementById('pl-bracket')?.value||37)/100;
+  const sd=STATE_MUNI_DB[stateCode]||{rate:0,name:'Other',etfs:[]};
+  const stateRate=sd.rate/100;
+  const combined=fedRate+stateRate;
+  if(sd.rate===0){
+    const tbillAfter=(5.3*(1-fedRate)).toFixed(1);
+    el.innerHTML=`<strong>No state income tax.</strong> T-bills at 5.3% net ~${tbillAfter}% after ${Math.round(fedRate*100)}% federal tax. Strong alternative to munis.`;
+  } else {
+    const ey=(sd.etfs[0]||{ey:3.2}).ey;
+    const teyVal=(ey/(1-combined)).toFixed(2);
+    el.innerHTML=`<strong>${sd.name} muni at ${ey}%</strong> = <strong>${teyVal}% TEY</strong> (taxable equivalent at ${Math.round(combined*100)}% combined rate). Double-exempt: both federal + ${sd.name} state tax free.`;
+  }
+}
+
+function togglePlanStrat(s){
+  const el=document.getElementById('pl-strat-'+s);if(!el)return;
+  if(planStrategies.has(s)){planStrategies.delete(s);el.classList.remove('on');}
+  else{
+    if(s==='roth'&&planExTF){toast('Roth Conversion disabled — Exclude Tax-Free is on','err');return;}
+    planStrategies.add(s);el.classList.add('on');
+  }
+}
+function togglePlanTF(){
+  planExTF=!planExTF;
+  const el=document.getElementById('pl-etf');if(el)el.classList.toggle('on',planExTF);
+  if(planExTF&&planStrategies.has('roth')){
+    planStrategies.delete('roth');
+    const re=document.getElementById('pl-strat-roth');if(re)re.classList.remove('on');
+    toast('Roth Conversion disabled','err');
+  }
+}
+
+function runPlanner(){
+  const tF=parseFloat(document.getElementById('pl-free').value)||0;
+  const tD=parseFloat(document.getElementById('pl-deferred').value)||0;
+  const tT=parseFloat(document.getElementById('pl-taxable').value)||0;
+  if(tF+tD+tT<=0){toast('Enter at least one income target','err');return;}
+  const stateCode=document.getElementById('pl-state')?.value||'CA';
+  const fedRate=parseFloat(document.getElementById('pl-bracket')?.value||37)/100;
+  const filing=document.getElementById('pl-filing')?.value||'MFJ';
+  S.taxProfile={state:stateCode,bracket:Math.round(fedRate*100),filing};
+  const r=computePlan(tF,tD,tT,[...planStrategies],planExTF,{stateCode,fedRate,filing});
+  S.plannerResult=r;
+  document.getElementById('plan-results').innerHTML=renderPlanResults(r);
+}
+
+function computePlan(tF,tD,tT,strats,exTF,taxProf){
+  const st=calcStats(); const ib=st.incBkt; const allPos=st.allPos;
+  const tp=taxProf||{stateCode:'CA',fedRate:0.37,filing:'MFJ'};
+  const stateCode=tp.stateCode||'CA';
+  const fedRate=tp.fedRate||0.37;
+  const filing=tp.filing||'MFJ';
+  const sd=STATE_MUNI_DB[stateCode]||{rate:0,name:'Your State',etfs:[{t:'MUB',d:'iShares National Muni',ey:3.2}]};
+  const stateRate=sd.rate/100;
+  const combined=fedRate+stateRate;
+  const tey=(y)=>+(y/(1-combined)).toFixed(2);
+  const teyFed=(y)=>+(y/(1-fedRate)).toFixed(2);
+  const qdiRate=fedRate>=0.37?0.20:fedRate>=0.22?0.15:0;
+  const dF=Math.max(0,tF-ib['tax-free']), dD=Math.max(0,tD-ib['tax-deferred']), dT=Math.max(0,tT-ib.taxable);
+
+  // ── STRATEGY OBJECTS ──────────────────────────────────────────────
+  const strategies={taxable:[],taxDeferred:[],taxFree:[]};
+
+  // ═══ TAXABLE STRATEGIES ═══════════════════════════════════════════
+
+  // 1. State-specific munis (only if state has meaningful income tax)
+  if(sd.rate>=3){
+    const e0=sd.etfs[0];
+    const stTEY=tey(e0.ey);
+    const isDoubleExempt=sd.etfs.length>0&&sd.rate>0;
+    strategies.taxable.push({
+      id:'state-muni',priority:'HIGH',
+      icon:'🏅',color:'var(--emerald)',
+      title:`${sd.name} Municipal Bonds`,
+      tagline:`Double Tax-Exempt: Federal + ${sd.name} State · ${fp(e0.ey)} = ${fp(stTEY)} TEY`,
+      body:`Interest from ${sd.name} municipal bonds is exempt from BOTH federal income tax (${Math.round(fedRate*100)}%) and ${sd.name} state income tax (${sd.rate}%). At your ${Math.round(combined*100)}% combined marginal rate, a ${fp(e0.ey)} muni yield is equivalent to ${fp(stTEY)} on a fully-taxable bond — making this one of the highest risk-adjusted after-tax yields available.`,
+      instruments:sd.etfs.map(e=>({t:e.t,d:e.d,ey:e.ey,teyStr:fp(tey(e.ey))+' TEY',note:isDoubleExempt?'Double-exempt: Fed + '+sd.name+' state':'Federal-exempt only'}))
+        .concat([{t:'Direct Munis',d:'Individual AA/AAA-rated '+sd.name+' GO bonds via bond desk',ey:3.5,teyStr:fp(tey(3.5))+' TEY',note:'Higher yield; ladder maturities 3–15 yr'}]),
+      caveats:[
+        'AMT caution: a small fraction of private-activity bonds may trigger AMT for high earners — use ETFs which screen for this',
+        'Credit quality: stick to AA/AAA general obligation (GO) bonds; avoid single-name revenue bonds without research',
+        'Account type: ONLY buy munis in taxable accounts — in an IRA, their tax-exempt advantage disappears entirely',
+        'Maturity risk: longer maturities yield more but are more sensitive to interest rate moves',
+      ],
+      accountType:'taxable',
+    });
+  }
+
+  // 2. National munis (federal-only exempt)
+  const natTEY=teyFed(3.2);
+  strategies.taxable.push({
+    id:'natl-muni',priority:sd.rate<3?'HIGH':'MEDIUM',
+    icon:'🏛️',color:'var(--blue)',
+    title:'National Municipal Bond ETFs (MUB / VTEB)',
+    tagline:`Federal Tax-Exempt · ${fp(3.2)} nominal = ${fp(natTEY)} TEY at ${Math.round(fedRate*100)}% bracket`,
+    body:`National muni ETFs hold bonds from all 50 states and are exempt from federal income tax. At your ${Math.round(fedRate*100)}% bracket, the ~${fp(3.2)}% yield equates to ${fp(natTEY)}% on a taxable bond. ${sd.rate>0?`Note: interest is still subject to ${sd.name} state income tax (${sd.rate}%) unless you use a ${sd.name}-specific fund above.`:'Your state has no income tax, so national munis capture the full federal tax benefit with maximum diversification.'}`,
+    instruments:[
+      {t:'MUB',d:'iShares National Muni Bond ETF',ey:3.2,teyStr:fp(teyFed(3.2))+' (fed TEY)',note:'$50B AUM · AAA/AA avg quality · 0.05% ER'},
+      {t:'VTEB',d:'Vanguard Tax-Exempt Bond ETF',ey:3.3,teyStr:fp(teyFed(3.3))+' (fed TEY)',note:'0.05% ER · 6,000+ bonds · very liquid'},
+      {t:'HYMB',d:'SPDR Nuveen High Yield Muni',ey:4.8,teyStr:fp(teyFed(4.8))+' (fed TEY)',note:'Higher yield · lower credit quality · BBB avg'},
+    ],
+    caveats:[
+      'State taxability: subject to your state income tax unless using a state-specific fund',
+      'AMT: less concern with diversified ETFs vs. individual bonds',
+      'Best for federal brackets of 22%+; at 12% a T-bill or CD often wins on after-tax yield',
+    ],
+    accountType:'taxable',
+  });
+
+  // 3. T-Bills (state income tax exempt)
+  const tbYield=5.3;
+  const tbAfterFed=+(tbYield*(1-fedRate)).toFixed(2);
+  strategies.taxable.push({
+    id:'tbill',priority:sd.rate>=7?'HIGH':sd.rate>=3?'MEDIUM':'LOW',
+    icon:'🇺🇸',color:'var(--sky)',
+    title:'Short-Term U.S. Treasury Bills (SGOV / BIL)',
+    tagline:`State Income Tax-Exempt · ~${fp(tbYield)} gross · ~${fp(tbAfterFed)} after federal`,
+    body:`U.S. Treasury interest is EXEMPT from all state and local income taxes — a powerful benefit in ${sd.rate>0?sd.name+` (${sd.rate}% state rate)`:' most states with income tax'}. The current ~${fp(tbYield)} T-bill yield, after ${Math.round(fedRate*100)}% federal tax, nets ~${fp(tbAfterFed)}%. ${sd.rate>3?`To beat this in ${sd.name}, a fully-taxable account (CDs, corp bonds) would need to yield more than ${fp(tbYield/(1-stateRate))}% just to break even on state tax alone.`:'T-bills are among the most liquid, safest instruments available.'}`,
+    instruments:[
+      {t:'SGOV',d:'iShares 0-3 Month Treasury Bond ETF',ey:5.3,teyStr:'State-exempt',note:'Ultra-short duration · daily liquidity · $30B AUM'},
+      {t:'BIL',d:'SPDR 1-3 Month T-Bill ETF',ey:5.25,teyStr:'State-exempt',note:'$25B AUM · among most liquid bond ETFs'},
+      {t:'USFR',d:'WisdomTree Floating Rate Treasury',ey:5.3,teyStr:'State-exempt',note:'Floating rate → tracks Fed Funds instantly'},
+      {t:'TBIL',d:'US Treasury 3 Month Bill ETF',ey:5.25,teyStr:'State-exempt',note:'Pure 3-month T-bill exposure'},
+    ],
+    caveats:[
+      'Federally taxable: rate doesn\'t beat munis at federal level — evaluate total after-tax (federal + state)',
+      'Reinvestment risk: if the Fed cuts rates, T-bill yields will fall quickly (within 90 days)',
+      'Replace CDs with T-bills: CDs have identical FDIC safety but are NOT state-tax-exempt — T-bills win on after-tax yield in high-state-tax states',
+    ],
+    accountType:'taxable',
+  });
+
+  // 4. I-Bonds
+  strategies.taxable.push({
+    id:'ibond',priority:'MEDIUM',
+    icon:'📈',color:'var(--amber)',
+    title:'Series I Savings Bonds',
+    tagline:`Inflation-Protected · State Tax-Exempt · $10K/yr Limit`,
+    body:`I-Bonds earn a composite rate (fixed + inflation component), currently ~4.28%. Interest is exempt from state income tax and deferred federally until you redeem — giving you control over the taxable year. The annual limit is $10,000 per Social Security number${filing==='MFJ'?' ($20,000 for married couples filing jointly — $10K each)':''}. Use as a risk-free, inflation-hedged component of your cash/bond ladder.`,
+    instruments:[
+      {t:'Series I Bond',d:'Purchase at TreasuryDirect.gov (no brokerage)',ey:4.28,teyStr:'State-exempt + deferred',note:`$10K/yr limit${filing==='MFJ'?' ($20K MFJ)':''} · electronic only · 30-yr maturity`},
+      {t:'Paper I-Bonds',d:'Via IRS tax refund (Form 8888)',ey:4.28,teyStr:'State-exempt + deferred',note:'Additional $5K/yr via paper bonds through tax refund'},
+    ],
+    caveats:[
+      '1-year lock-up: cannot redeem within the first 12 months from purchase',
+      '5-year penalty: redeeming before 5 years forfeits the last 3 months of interest',
+      'No ETF available: must buy directly at TreasuryDirect.gov — cannot hold in a brokerage account',
+      `Contribution limit: ${filing==='MFJ'?'$20,000':'$10,000'}/yr limits scalability as a core strategy`,
+    ],
+    accountType:'taxable',
+  });
+
+  // 5. Qualified Dividend ETFs
+  const qdiNet=+(3.5*(1-qdiRate-stateRate)).toFixed(2);
+  strategies.taxable.push({
+    id:'qdi',priority:qdiRate===0?'HIGH':'LOW',
+    icon:'📊',color:'var(--purple)',
+    title:'Qualified Dividend ETFs (SCHD / VYM)',
+    tagline:`Taxed at ${Math.round(qdiRate*100)}% cap gains rate · SCHD 3.5% yield + ~12%/yr dividend growth`,
+    body:`Qualified dividends from ETFs like SCHD are taxed at the long-term capital gains rate (${Math.round(qdiRate*100)}%) rather than ordinary income (${Math.round(fedRate*100)}%). After your ${Math.round(qdiRate*100)}% fed + ${sd.rate}% state cap gains rate, SCHD's 3.5% yield nets ~${fp(qdiNet)}%. The real advantage is SCHD's dividend growth: ~12% per year over the last decade. Income you buy today at 3.5% may yield much more on your cost basis in 10 years — all while growing your principal.`,
+    instruments:[
+      {t:'SCHD',d:'Schwab U.S. Dividend Equity ETF',ey:3.5,teyStr:'QDI rate',note:'~12% dividend CAGR · 10yr · 0.06% ER · quality screen'},
+      {t:'VYM',d:'Vanguard High Dividend Yield ETF',ey:3.0,teyStr:'QDI rate',note:'$60B AUM · broad diversification · 0.06% ER'},
+      {t:'HDV',d:'iShares Core High Dividend ETF',ey:3.6,teyStr:'QDI rate',note:'Defensive sector tilt · 0.08% ER'},
+      {t:'DGRO',d:'iShares Core Dividend Growth ETF',ey:2.5,teyStr:'QDI rate',note:'Strong dividend growth screen · 0.08% ER'},
+    ],
+    caveats:[
+      'Equity risk: price will fall in bear markets — not suitable as primary income if you need stability',
+      'Yield is lower than bonds today: primarily a long-term income-growth strategy',
+      'Not all dividends qualify: confirm >90% are "qualified" dividends; avoid ETFs with heavy REIT exposure here',
+    ],
+    accountType:'taxable',
+  });
+
+  // ═══ TAX-DEFERRED STRATEGIES ══════════════════════════════════════
+
+  // 1. High-Yield Bonds in IRA
+  strategies.taxDeferred.push({
+    id:'hy-bonds',priority:'HIGH',
+    icon:'💰',color:'var(--blue)',
+    title:'High-Yield Corporate Bond ETFs',
+    tagline:`~7% Yield · Non-Qualified Income → Fully Sheltered in IRA`,
+    body:`High-yield (aka "junk") bonds yield ~7% in interest income. That income is classified as ordinary income — taxed at ${Math.round(fedRate*100)}% federally if held in taxable. In a Traditional IRA or 401(k), it compounds tax-deferred. Moving HY bonds from taxable to IRA is one of the single highest-impact tax-efficiency moves. A $100,000 HY bond position generates $7,000/yr — saving ~${fc(7000*fedRate)} in annual taxes by keeping it in an IRA.`,
+    instruments:[
+      {t:'JNK',d:'SPDR Bloomberg High Yield Bond ETF',ey:6.8,teyStr:'IRA-sheltered',note:'$7B AUM · monthly income · most liquid HY ETF'},
+      {t:'USHY',d:'iShares Broad USD HY Bond ETF',ey:7.2,teyStr:'IRA-sheltered',note:'Broadest index · lowest cost · 0.15% ER'},
+      {t:'HYG',d:'iShares iBoxx USD HY Corp Bond ETF',ey:6.9,teyStr:'IRA-sheltered',note:'Highly liquid · widely used for HY exposure'},
+      {t:'FAHY',d:'Fidelity High Yield Factor ETF',ey:7.0,teyStr:'IRA-sheltered',note:'Fidelity factor-screened HY · lower default rate'},
+    ],
+    caveats:[
+      'Credit risk: these are BB/B-rated bonds — diversify via ETF, never hold individual junk bonds',
+      'Equity correlation: HY bond prices fall with stocks in recessions — they\'re not purely "bond safety"',
+      'Hold in IRA ONLY: HY in taxable is among the most tax-inefficient placements possible',
+    ],
+    accountType:'tax-deferred',
+  });
+
+  // 2. BDCs
+  strategies.taxDeferred.push({
+    id:'bdc',priority:'HIGH',
+    icon:'🏗️',color:'var(--emerald)',
+    title:'Business Development Companies (BDCs)',
+    tagline:`6.5–10.5% Yield · Must Distribute 90%+ Income · Non-Qualified → IRA Only`,
+    body:`BDCs are SEC-regulated lenders to private mid-market companies — think private credit meets a publicly-traded REIT structure. By law, they must distribute 90%+ of income as dividends, making them extraordinary income generators. All BDC dividends are NON-QUALIFIED ordinary income — taxed at your full ${Math.round(fedRate*100)}% rate in taxable. In an IRA, that income compounds untaxed. A $50,000 BDC allocation at 9% generates $4,500/yr tax-deferred vs. $2,745 after-tax in taxable at your rate.`,
+    instruments:[
+      {t:'ARCC',d:'Ares Capital Corp — largest BDC ($22B portfolio)',ey:9.0,teyStr:'IRA-sheltered',note:'Most diversified BDC · 25yr track record · monthly income'},
+      {t:'MAIN',d:'Main Street Capital — internally managed',ey:6.5,teyStr:'IRA-sheltered',note:'Monthly regular + semi-annual special dividends · premium quality'},
+      {t:'HTGC',d:'Hercules Capital — tech/life science lending',ey:10.5,teyStr:'IRA-sheltered',note:'Highest yield · venture debt niche · strong origination'},
+      {t:'BXSL',d:'Blackstone Secured Lending Fund',ey:10.0,teyStr:'IRA-sheltered',note:'Senior secured focus · Blackstone deal flow · lower loss rate'},
+      {t:'OBDC',d:'Blue Owl Capital Corp',ey:9.5,teyStr:'IRA-sheltered',note:'Direct origination · diversified middle market'},
+    ],
+    caveats:[
+      'NAV monitoring: check market price vs. NAV per share quarterly — avoid paying >10% premium to NAV',
+      'Leverage: BDCs use ~1:1 debt — amplifies both income and losses in credit downturns',
+      'Rate sensitivity: BDC portfolios are mostly floating rate loans — income rises with rates, falls if rates are cut',
+      'NEVER hold in taxable: non-qualified ordinary income at your bracket is a severe tax drag',
+    ],
+    accountType:'tax-deferred',
+  });
+
+  // 3. CLO ETFs
+  strategies.taxDeferred.push({
+    id:'clo',priority:'MEDIUM',
+    icon:'🔵',color:'var(--sky)',
+    title:'AAA-Rated CLO ETFs (JAAA / CLOA)',
+    tagline:`~6% Yield · AAA Credit Quality · Floating Rate · IRA-Optimal`,
+    body:`Collateralized Loan Obligations (CLOs) pool hundreds of floating-rate senior secured corporate loans. The AAA tranche — the safest slice — has never experienced a principal loss in any CLO in history, including the 2008 financial crisis. They yield ~6%, which is ~1.5% above investment-grade corporate bonds of the same credit rating. Non-qualified income → shelter in IRA.`,
+    instruments:[
+      {t:'JAAA',d:'Janus Henderson AAA CLO ETF',ey:6.2,teyStr:'IRA-sheltered',note:'$15B AUM · largest CLO ETF · AAA-only · floating rate'},
+      {t:'CLOA',d:'BlackRock AAA CLO ETF',ey:6.0,teyStr:'IRA-sheltered',note:'BlackRock managed · institutional quality · 0.20% ER'},
+      {t:'CLDT',d:'PGIM AAA CLO ETF',ey:6.1,teyStr:'IRA-sheltered',note:'Diversified CLO pool · PGIM fixed income management'},
+    ],
+    caveats:[
+      'Complexity premium: CLOs are opaque by design — the ETF structure simplifies this but understand you\'re lending to leveraged companies',
+      'Liquidity: in acute market stress, CLO ETF spreads widen (though the underlying paper is very safe)',
+      'SOFR linkage: yield tracks short-term rates — if the Fed cuts aggressively, CLO yield drops within quarters',
+    ],
+    accountType:'tax-deferred',
+  });
+
+  // 4. TIPS in IRA
+  strategies.taxDeferred.push({
+    id:'tips',priority:'MEDIUM',
+    icon:'🛡️',color:'var(--amber)',
+    title:'TIPS (Treasury Inflation-Protected Securities)',
+    tagline:`Real Yield ~2–2.5% + Inflation · IRA Eliminates "Phantom Income" Tax`,
+    body:`TIPS protect purchasing power by adjusting principal with CPI inflation. In TAXABLE accounts, the inflation-adjustment portion is taxed each year even though you don\'t receive cash — this "phantom income" makes TIPS surprisingly tax-inefficient in taxable. In an IRA, the full inflation-adjusted return compounds untaxed. Current real yield ~2.0-2.5% — positive real yield is historically attractive and acts as portfolio insurance against sustained inflation.`,
+    instruments:[
+      {t:'SCHP',d:'Schwab U.S. TIPS ETF (full maturity)',ey:2.5,teyStr:'IRA-sheltered',note:'Lowest cost (0.03% ER) · all TIPS maturities · strong inflation hedge'},
+      {t:'VTIP',d:'Vanguard Short-Term Inflation-Protected',ey:2.2,teyStr:'IRA-sheltered',note:'0-5 year TIPS · less rate sensitivity · near-cash alternative'},
+      {t:'STIP',d:'iShares 0-5 Year TIPS Bond ETF',ey:2.3,teyStr:'IRA-sheltered',note:'Ultra-short · minimal duration risk'},
+    ],
+    caveats:[
+      'Deflation scenario: if CPI is negative, principal adjusts down (though floored at original face value at maturity)',
+      'Real yield vs. nominal: compare TIPS real yield to the "breakeven inflation rate" — TIPS wins if actual inflation exceeds ~2.3%',
+      'Do NOT hold in taxable: phantom income taxation makes TIPS 40-50% less efficient outside an IRA',
+    ],
+    accountType:'tax-deferred',
+  });
+
+  // 5. REITs in Tax-Deferred
+  strategies.taxDeferred.push({
+    id:'reit-ira',priority:'MEDIUM',
+    icon:'🏢',color:'var(--purple)',
+    title:'REITs in Tax-Deferred Account',
+    tagline:`4–5.5% Yield · Ordinary Income → Sheltered in IRA`,
+    body:`REITs are required to distribute 90%+ of income as dividends. Most REIT dividends are NON-QUALIFIED (ordinary income) — taxed at your ${Math.round(fedRate*100)}% rate if held in taxable. In a Traditional IRA, the income compounds deferred. Consider upgrading to Roth (see Tax-Free strategies) for the highest long-term benefit, since the income will be tax-free rather than just deferred.`,
+    instruments:[
+      {t:'VNQ',d:'Vanguard Real Estate ETF',ey:4.5,teyStr:'IRA-sheltered',note:'$35B AUM · diversified REIT exposure · 0.12% ER'},
+      {t:'O',d:'Realty Income Corp (The Monthly Dividend Company)',ey:5.5,teyStr:'IRA-sheltered',note:'Monthly dividends · 25+ yr growth history · S&P 500 member'},
+      {t:'SCHH',d:'Schwab U.S. REIT ETF',ey:4.0,teyStr:'IRA-sheltered',note:'Lowest cost REIT ETF (0.07% ER) · broad exposure'},
+    ],
+    caveats:[
+      'IRA vs. Roth: REITs are better in Roth for maximum long-term benefit (tax-free vs. tax-deferred)',
+      'Interest rate sensitivity: REIT prices fall when rates rise — this is a long-term income play, not a trading vehicle',
+    ],
+    accountType:'tax-deferred',
+  });
+
+  // ═══ TAX-FREE STRATEGIES ══════════════════════════════════════════
+
+  // 1. Covered Call ETFs in Roth
+  strategies.taxFree.push({
+    id:'covered-call',priority:'HIGH',
+    icon:'🎯',color:'var(--emerald)',
+    title:'Covered Call Income ETFs (JEPI / JEPQ)',
+    tagline:`7.5–9% Yield · 100% Non-Qualified → Completely Tax-Free in Roth`,
+    body:`JEPI and JEPQ generate income by selling Equity-Linked Notes (ELNs) — essentially covered call option strategies on the S&P 500 and Nasdaq-100. Yield: JEPI ~7.5%, JEPQ ~9.0%. Critical tax detail: this options premium income is NON-QUALIFIED — taxed at ordinary income rates (${Math.round(fedRate*100)}%) in taxable accounts. In a Roth IRA, every dollar of that income is completely and permanently tax-free. Placing JEPI/JEPQ in Roth is one of the single highest-impact tax-location decisions available to any investor.`,
+    instruments:[
+      {t:'JEPI',d:'JPMorgan Equity Premium Income ETF',ey:7.5,teyStr:'100% Tax-Free in Roth',note:'S&P 500 underlying · monthly income · $35B AUM · 0.35% ER'},
+      {t:'JEPQ',d:'JPMorgan Nasdaq Equity Premium Income',ey:9.0,teyStr:'100% Tax-Free in Roth',note:'Nasdaq-100 underlying · higher yield · more tech growth exposure'},
+      {t:'GPIQ',d:'Goldman Sachs Nasdaq Equity Premium Income',ey:8.5,teyStr:'100% Tax-Free in Roth',note:'Goldman version · similar structure to JEPQ'},
+      {t:'XYLD',d:'Global X S&P 500 Covered Call ETF',ey:10.0,teyStr:'100% Tax-Free in Roth',note:'Higher yield · more aggressive call writing · more upside cap'},
+    ],
+    caveats:[
+      'Capped equity upside: covered call structure limits price appreciation during strong bull markets — trades growth for income',
+      'Variable yield: income fluctuates with market volatility (VIX) — falls in calm markets, spikes in volatile ones',
+      'Non-qualified income: NEVER hold in taxable — your ${Math.round(fedRate*100)}% tax bracket makes this a very costly mistake',
+      'Roth-first rule: if you have JEPI/JEPQ in any non-Roth account, moving them to Roth is the highest-priority action',
+    ],
+    accountType:'tax-free',
+  });
+
+  // 2. REITs in Roth
+  strategies.taxFree.push({
+    id:'reit-roth',priority:'HIGH',
+    icon:'🏘️',color:'var(--blue)',
+    title:'REITs in Roth IRA',
+    tagline:`4.5–5.5% Yield · Non-Qualified Dividends → Permanently Tax-Free`,
+    body:`REITs distribute 90%+ of income as ordinary dividends — taxed at ${Math.round(fedRate*100)}% in taxable, deferred in traditional IRA. In a Roth, that income is tax-free forever. Realty Income (O) has paid monthly dividends for 30+ years and increased them 120+ consecutive times. In a Roth, the growing income stream compounds without ever triggering a tax bill — even at retirement withdrawal.`,
+    instruments:[
+      {t:'VNQ',d:'Vanguard Real Estate ETF',ey:4.5,teyStr:'Tax-Free in Roth',note:'Diversified · all major property types · 0.12% ER'},
+      {t:'O',d:'Realty Income Corp',ey:5.5,teyStr:'Tax-Free in Roth',note:'Monthly dividends · net lease · 25+ yr consecutive increases'},
+      {t:'AMT',d:'American Tower Corp',ey:3.2,teyStr:'Tax-Free in Roth',note:'Cell tower REIT · strong growth + income'},
+      {t:'STAG',d:'STAG Industrial (monthly dividends)',ey:4.0,teyStr:'Tax-Free in Roth',note:'Industrial/warehouse REIT · monthly income'},
+    ],
+    caveats:[
+      'Rate sensitivity: REIT prices inversely correlate with interest rates — a long-term hold in Roth weathers this well',
+      'Individual REITs (O, AMT) carry concentration risk — combine with VNQ for diversification',
+    ],
+    accountType:'tax-free',
+  });
+
+  // 3. Dividend Growth in Roth
+  strategies.taxFree.push({
+    id:'div-growth-roth',priority:'MEDIUM',
+    icon:'🌱',color:'var(--purple)',
+    title:'Dividend Growth ETFs in Roth (SCHD)',
+    tagline:`3.5% Yield Today · ~12%/yr Dividend Growth · Tax-Free Compounding`,
+    body:`SCHD's dividend has compounded at ~12% per year for over a decade. At that rate, a 3.5% starting yield becomes 10.9% yield-on-cost in 10 years and 33.8% in 20 years — all tax-free in a Roth. This is the strategy for investors with 10+ year horizons: sacrifice current yield for an exponentially growing, fully tax-free income stream. The most powerful long-term Roth allocation for income investors.`,
+    instruments:[
+      {t:'SCHD',d:'Schwab U.S. Dividend Equity ETF',ey:3.5,teyStr:'Tax-Free (grows ~12%/yr)',note:'Quality screen · low beta · 0.06% ER · best-in-class dividend growth'},
+      {t:'VIG',d:'Vanguard Dividend Appreciation ETF',ey:1.8,teyStr:'Tax-Free (grows ~10%/yr)',note:'10+ yr consecutive div growth requirement · very stable'},
+      {t:'DGRW',d:'WisdomTree U.S. Quality Dividend Growth',ey:2.2,teyStr:'Tax-Free (grows ~9%/yr)',note:'Earnings growth + dividend growth dual screen'},
+    ],
+    caveats:[
+      'Lower current yield: not for investors who need income in the near term',
+      'Roth-specific: this strategy derives most of its value from the tax-free compounding horizon — less compelling outside Roth',
+      'Market risk: equity fund, subject to drawdowns in recessions',
+    ],
+    accountType:'tax-free',
+  });
+
+  // 4. Preferred Stocks in Roth
+  strategies.taxFree.push({
+    id:'preferred-roth',priority:'MEDIUM',
+    icon:'⭐',color:'var(--amber)',
+    title:'Preferred Stock ETFs (PFF / PFFD) in Roth',
+    tagline:`5.5–6% Yield · Mixed Qualified/Non-Qualified → All Tax-Free in Roth`,
+    body:`Preferred stocks occupy the capital structure between bonds (fixed income) and common stock (equity). They yield 5.5-6% — significantly above common stock dividends. Income is a mix of qualified (~30-40%) and non-qualified income — making the tax treatment complex in taxable. In Roth, this complexity disappears: all income is tax-free regardless of classification.`,
+    instruments:[
+      {t:'PFF',d:'iShares Preferred and Income Securities ETF',ey:5.5,teyStr:'Tax-Free in Roth',note:'$18B AUM · most liquid preferred ETF · monthly income'},
+      {t:'PFFD',d:'Global X U.S. Preferred ETF',ey:5.8,teyStr:'Tax-Free in Roth',note:'Lower ER (0.23%) vs PFF · similar exposure'},
+      {t:'FPE',d:'First Trust Preferred Securities & Income ETF',ey:6.0,teyStr:'Tax-Free in Roth',note:'Active management · international preferred included'},
+    ],
+    caveats:[
+      'Duration risk: preferreds have long or perpetual duration — prices fall sharply when rates rise',
+      'Financial sector concentration: ~70% of the preferred market is banks and insurance companies',
+      'Call risk: issuers can redeem preferreds at par when it suits them, compressing your effective yield',
+    ],
+    accountType:'tax-free',
+  });
+
+  // ═══ ASSET LOCATION DIAGNOSTICS + ACTION ITEMS ═══════════════════
+  const assetLocDiags=[];
+  const actionItems=[];  // {group,action,holding,desc,account,value,incGain,priority,note}
+
+  // Helpers
+  const findAcct=(type)=>{const p=allPos.find(x=>x.taxTreatment===type);return p?p.accountName:type==='tax-deferred'?'Traditional IRA/401k':type==='tax-free'?'Roth IRA/HSA':'Taxable Brokerage';};
+  const taxableAcct=findAcct('taxable');
+  const deferredAcct=findAcct('tax-deferred');
+  const freeAcct=findAcct('tax-free');
+  const muniSym=sd.etfs[0]?.t||'MUB';
+  const muniDesc=sd.etfs[0]?.d||'National Muni Bond ETF';
+  const muniEy=sd.etfs[0]?.ey||3.2;
+
+  // ── Munis in IRA ──────────────────────────────────────────────────
+  const muniInDeferred=allPos.filter(p=>p.isMuni&&p.taxTreatment==='tax-deferred');
+  if(muniInDeferred.length>0){
+    const v=muniInDeferred.reduce((s,p)=>s+p.value,0);
+    assetLocDiags.push({severity:'HIGH',icon:'🚨',
+      title:'Municipal Bonds in Tax-Deferred Account',
+      issue:`${muniInDeferred.map(p=>p.symbol).join(', ')} totaling ${fc(v)} are in a tax-deferred (IRA/401k) account.`,
+      why:'Munis are already tax-exempt from federal income tax. In an IRA, that tax-free income gets converted into ordinary taxable income at withdrawal — you LOSE the muni\'s core advantage.',
+      fix:`Move to taxable brokerage. Replace IRA allocation with high-yield bonds (JNK/USHY ~7%) or BDCs (ARCC/HTGC 9-10%) — these are far better suited for IRA shelter.`,
+    });
+    muniInDeferred.forEach(p=>{
+      actionItems.push({group:'Asset Location Fix',action:'SELL',holding:p.symbol,desc:(p.description||p.symbol).slice(0,50),account:p.accountName,value:p.value,incGain:null,priority:'HIGH',note:'Muni tax-exemption wasted in IRA → move out'});
+      actionItems.push({group:'Asset Location Fix',action:'BUY',holding:'JNK / ARCC',desc:'High-Yield Bond ETF or BDC (in same IRA)',account:p.accountName,value:p.value,incGain:+(p.value*0.07).toFixed(0),priority:'HIGH',note:'Replace with non-qualified income sheltered by IRA'});
+      actionItems.push({group:'Asset Location Fix',action:'BUY',holding:muniSym,desc:`${muniDesc} (move to taxable)`,account:taxableAcct,value:p.value,incGain:+(p.value*muniEy/100).toFixed(0),priority:'HIGH',note:`TEY: ${fp(tey(muniEy))} — double-exempt in taxable`});
+    });
+  }
+
+  // ── HY Bonds in Taxable ───────────────────────────────────────────
+  const hyInTaxable=allPos.filter(p=>p.taxTreatment==='taxable'&&(p.subClass||'').toLowerCase().includes('high yield')&&p.estimatedYield>5.5);
+  if(hyInTaxable.length>0){
+    const v=hyInTaxable.reduce((s,p)=>s+p.value,0);
+    const annualTaxDrag=v*(hyInTaxable[0].estimatedYield||7)/100*fedRate;
+    assetLocDiags.push({severity:'HIGH',icon:'🚨',
+      title:'High-Yield Bonds in Taxable Account',
+      issue:`${hyInTaxable.map(p=>p.symbol).join(', ')} (${fc(v)}) generate non-qualified ordinary income in a taxable account.`,
+      why:`At ${Math.round(fedRate*100)}% federal rate, this costs you ~${fc(annualTaxDrag)}/yr in unnecessary taxes. HY income is non-qualified — fully taxable as ordinary income.`,
+      fix:`Move to Traditional IRA. In taxable, replace with munis${sd.rate>0?' ('+sd.name+'-specific: TEY '+fp(tey(3.3))+'%)':'(MUB/VTEB)'} for after-tax income optimization.`,
+    });
+    hyInTaxable.forEach(p=>{
+      const hy=p.estimatedYield||7;
+      actionItems.push({group:'Asset Location Fix',action:'SELL',holding:p.symbol,desc:(p.description||p.symbol).slice(0,50),account:p.accountName,value:p.value,incGain:null,priority:'HIGH',note:`${fp(hy)} ordinary income taxed at ${Math.round(fedRate*100)}% → costs ${fc(p.value*hy/100*fedRate)}/yr in taxes`});
+      actionItems.push({group:'Asset Location Fix',action:'BUY',holding:'JNK / USHY',desc:'High-Yield Bond ETF (in IRA — sheltered)',account:deferredAcct,value:p.value,incGain:+(p.value*hy/100).toFixed(0),priority:'HIGH',note:`${fp(hy)} yield now fully tax-deferred`});
+      actionItems.push({group:'Asset Location Fix',action:'BUY',holding:muniSym,desc:`${muniDesc} (replace in taxable)`,account:p.accountName,value:p.value,incGain:+(p.value*muniEy/100).toFixed(0),priority:'HIGH',note:`TEY: ${fp(tey(muniEy))} — tax-efficient replacement`});
+    });
+  }
+
+  // ── REITs in Taxable ──────────────────────────────────────────────
+  const reitInTaxable=allPos.filter(p=>p.taxTreatment==='taxable'&&(p.subClass||'').toLowerCase().includes('reit'));
+  if(reitInTaxable.length>0){
+    const v=reitInTaxable.reduce((s,p)=>s+p.value,0);
+    assetLocDiags.push({severity:'MEDIUM',icon:'⚠️',
+      title:'REITs in Taxable Account',
+      issue:`${reitInTaxable.map(p=>p.symbol).join(', ')} (${fc(v)}) — REIT dividends are mostly non-qualified ordinary income.`,
+      why:`REIT distributions are taxed as ordinary income (${Math.round(fedRate*100)}%) rather than at capital gains rates. Holding in Roth converts this to entirely tax-free income.`,
+      fix:'Move REITs to Roth IRA for permanent tax-free income. Or to Traditional IRA if no Roth space. Replace taxable REIT allocation with qualified dividend ETFs (SCHD/VYM).',
+    });
+    reitInTaxable.forEach(p=>{
+      const ry=p.estimatedYield||4.5;
+      actionItems.push({group:'Asset Location Fix',action:'SELL',holding:p.symbol,desc:(p.description||p.symbol).slice(0,50),account:p.accountName,value:p.value,incGain:null,priority:'MEDIUM',note:`REIT ordinary dividends taxed at ${Math.round(fedRate*100)}%`});
+      actionItems.push({group:'Asset Location Fix',action:'BUY',holding:'VNQ / O',desc:'REIT ETF or Realty Income (in Roth)',account:freeAcct,value:p.value,incGain:+(p.value*ry/100).toFixed(0),priority:'MEDIUM',note:'Same yield — now permanently tax-free'});
+      actionItems.push({group:'Asset Location Fix',action:'BUY',holding:'SCHD / VYM',desc:'Qualified Dividend ETF (replace in taxable)',account:p.accountName,value:p.value,incGain:+(p.value*0.035).toFixed(0),priority:'MEDIUM',note:'QDI rate vs ordinary income — more tax-efficient'});
+    });
+  }
+
+  // ── Covered Call ETFs in Taxable ──────────────────────────────────
+  const ccInTaxable=allPos.filter(p=>p.taxTreatment==='taxable'&&(p.subClass||'').toLowerCase().includes('covered call'));
+  if(ccInTaxable.length>0){
+    const v=ccInTaxable.reduce((s,p)=>s+p.value,0);
+    const avgYield=(ccInTaxable.reduce((s,p)=>s+(p.estimatedYield||7.5)*p.value,0)/v)||7.5;
+    const annualTaxDrag=v*avgYield/100*fedRate;
+    assetLocDiags.push({severity:'HIGH',icon:'🚨',
+      title:'Covered Call ETFs (JEPI/JEPQ) in Taxable Account',
+      issue:`${ccInTaxable.map(p=>p.symbol).join(', ')} (${fc(v)}) generate ~${fp(avgYield)} in non-qualified option premium income in a taxable account.`,
+      why:`Options premium is 100% non-qualified ordinary income — taxed at ${Math.round(fedRate*100)}%. This costs ~${fc(annualTaxDrag)}/yr in avoidable taxes.`,
+      fix:'Move JEPI/JEPQ to Roth IRA immediately — this is the single highest-impact tax-location fix available. In taxable, replace with SCHD/VYM for QDI treatment.',
+    });
+    ccInTaxable.forEach(p=>{
+      const cy=p.estimatedYield||7.5;
+      actionItems.push({group:'Asset Location Fix',action:'SELL',holding:p.symbol,desc:(p.description||p.symbol).slice(0,50),account:p.accountName,value:p.value,incGain:null,priority:'HIGH',note:`${fp(cy)} non-qualified income at ${Math.round(fedRate*100)}% → ${fc(p.value*cy/100*fedRate)}/yr avoidable tax`});
+      actionItems.push({group:'Asset Location Fix',action:'BUY',holding:p.symbol,desc:`Same ETF — move to Roth`,account:freeAcct,value:p.value,incGain:+(p.value*cy/100).toFixed(0),priority:'HIGH',note:`${fp(cy)} yield → 100% tax-free in Roth`});
+      actionItems.push({group:'Asset Location Fix',action:'BUY',holding:'SCHD / VYM',desc:'Qualified Dividend ETF (replace in taxable)',account:p.accountName,value:p.value,incGain:+(p.value*0.035).toFixed(0),priority:'HIGH',note:'QDI-eligible: taxed at cap gains rate, not ordinary income'});
+    });
+  }
+
+  // ── CDs → T-Bills (state tax opportunity) ────────────────────────
+  const cdInTaxable=stateRate>=0.04?allPos.filter(p=>p.taxTreatment==='taxable'&&(p.subClass||'').toLowerCase().includes('certificate')):[];
+  if(cdInTaxable.length>0){
+    const v=cdInTaxable.reduce((s,p)=>s+p.value,0);
+    const cdY=(cdInTaxable[0].estimatedYield||4.7);
+    const saving=+(v*cdY/100*stateRate).toFixed(0);
+    assetLocDiags.push({severity:'MEDIUM',icon:'💡',
+      title:`CDs vs. T-Bills: State Tax Opportunity (${sd.name})`,
+      issue:`${cdInTaxable.map(p=>p.symbol).join(', ')} (${fc(v)}) are CDs in a taxable account in ${sd.name}.`,
+      why:`CD interest is taxed at BOTH federal (${Math.round(fedRate*100)}%) AND ${sd.name} state (${sd.rate}%) rates. T-bills (SGOV/BIL) pay similar rates but are STATE INCOME TAX EXEMPT.`,
+      fix:`Replace CDs with SGOV or BIL T-bill ETFs (~5.3% yield). At ${sd.rate}% state rate on ${fc(v)}, this saves ~${fc(saving)}/yr in state taxes with zero credit risk.`,
+    });
+    cdInTaxable.forEach(p=>{
+      const saving2=+(p.value*(p.estimatedYield||4.7)/100*stateRate).toFixed(0);
+      actionItems.push({group:'Asset Location Fix',action:'SELL',holding:p.symbol,desc:(p.description||p.symbol).slice(0,50),account:p.accountName,value:p.value,incGain:null,priority:'MEDIUM',note:`CD: taxed at fed+state. T-bills save ~${fc(saving2)}/yr in ${sd.name} state tax`});
+      actionItems.push({group:'Asset Location Fix',action:'BUY',holding:'SGOV / BIL',desc:'U.S. T-Bill ETF (state income tax exempt)',account:p.accountName,value:p.value,incGain:+(p.value*0.053).toFixed(0),priority:'MEDIUM',note:`~5.3% yield · state-exempt · saves ~${fc(saving2)}/yr`});
+    });
+  }
+
+  // ── Growth stocks in Traditional IRA ─────────────────────────────
+  const growthInIRA=allPos.filter(p=>p.taxTreatment==='tax-deferred'&&p.assetClass==='Stocks'&&(p.estimatedYield||0)<0.5);
+  if(growthInIRA.length>0){
+    const v=growthInIRA.reduce((s,p)=>s+p.value,0);
+    if(v>10000){
+      assetLocDiags.push({severity:'MEDIUM',icon:'💡',
+        title:'Low-Yield Growth Stocks in Traditional IRA',
+        issue:`${growthInIRA.slice(0,3).map(p=>p.symbol).join(', ')}${growthInIRA.length>3?` + ${growthInIRA.length-3} more`:''} (${fc(v)}) — near-zero yield growth stocks in a tax-deferred account.`,
+        why:'Growth stocks generate future value through appreciation, not income. In a Traditional IRA, all of that appreciation gets converted into ordinary taxable income at withdrawal. In Roth, it\'s permanently tax-free.',
+        fix:'Consider Roth conversion for high-growth, low-yield positions. Every dollar of growth stock gains in Roth is worth ~40% more at withdrawal vs. Traditional IRA at your bracket.',
+      });
+      // Group these together in one action item
+      actionItems.push({group:'Roth Conversion',action:'CONVERT',holding:growthInIRA.slice(0,3).map(p=>p.symbol).join(' / ')+(growthInIRA.length>3?' +more':''),desc:`${growthInIRA.length} growth stock(s) — Traditional IRA → Roth IRA`,account:growthInIRA[0].accountName+' → '+freeAcct,value:v,incGain:null,priority:'MEDIUM',note:`Roth conversion: ~${fc(v*fedRate)} tax due now; all future gains permanently tax-free. Best done in lower-income years.`});
+    }
+  }
+
+  // ═══ INCOME GAP ACTION ITEMS (reallocation to hit targets) ════════
+  const HY_IRA=7.0, CC_ROTH=8.0;
+
+  if(dD>0){
+    const capNeeded=(dD/HY_IRA)*100;
+    const lowIRA=allPos.filter(p=>p.taxTreatment==='tax-deferred'&&(p.estimatedYield||0)<3.5&&p.assetClass!=='Cash').sort((a,b)=>(a.estimatedYield||0)-(b.estimatedYield||0));
+    let rem=capNeeded;
+    for(const p of lowIRA){
+      if(rem<=0)break;
+      const sa=Math.min(rem,p.value);
+      const ig=+(sa*(HY_IRA-(p.estimatedYield||0))/100).toFixed(0);
+      actionItems.push({group:'Income Gap — Tax-Deferred',action:'SELL',holding:p.symbol,desc:(p.description||p.symbol).slice(0,50),account:p.accountName,value:sa,incGain:null,priority:'MEDIUM',note:`${fp(p.estimatedYield||0)} yield → reinvest at ~${fp(HY_IRA)}%`});
+      actionItems.push({group:'Income Gap — Tax-Deferred',action:'BUY',holding:'JNK / ARCC / JAAA',desc:'HY Bond ETF / BDC / CLO (high-yield IRA)',account:p.accountName,value:sa,incGain:ig,priority:'MEDIUM',note:`+${fc(ig)}/yr additional income`});
+      rem-=sa;
+    }
+    if(rem>0) actionItems.push({group:'Income Gap — Tax-Deferred',action:'DEPOSIT',holding:'JNK / ARCC',desc:'New capital needed — HY bonds or BDC in IRA',account:deferredAcct,value:rem,incGain:+(rem*HY_IRA/100).toFixed(0),priority:'LOW',note:`Verify IRS contribution limits. Generates ${fc(rem*HY_IRA/100)}/yr`});
+  }
+
+  if(dF>0&&!exTF){
+    const capNeeded=(dF/CC_ROTH)*100;
+    const lowFree=allPos.filter(p=>p.taxTreatment==='tax-free'&&(p.estimatedYield||0)<3.0&&p.assetClass!=='Cash').sort((a,b)=>(a.estimatedYield||0)-(b.estimatedYield||0));
+    let rem=capNeeded;
+    for(const p of lowFree){
+      if(rem<=0)break;
+      const sa=Math.min(rem,p.value);
+      const ig=+(sa*(CC_ROTH-(p.estimatedYield||0))/100).toFixed(0);
+      actionItems.push({group:'Income Gap — Tax-Free',action:'SELL',holding:p.symbol,desc:(p.description||p.symbol).slice(0,50),account:p.accountName,value:sa,incGain:null,priority:'MEDIUM',note:`${fp(p.estimatedYield||0)} yield in Roth → reinvest at ~${fp(CC_ROTH)}% (JEPI/JEPQ)`});
+      actionItems.push({group:'Income Gap — Tax-Free',action:'BUY',holding:'JEPI / JEPQ',desc:'Covered Call ETF (tax-free income in Roth)',account:p.accountName,value:sa,incGain:ig,priority:'MEDIUM',note:`+${fc(ig)}/yr tax-free income`});
+      rem-=sa;
+    }
+    if(rem>0) actionItems.push({group:'Income Gap — Tax-Free',action:'DEPOSIT',holding:'JEPI / JEPQ',desc:'New Roth contribution needed',account:freeAcct,value:rem,incGain:+(rem*CC_ROTH/100).toFixed(0),priority:'LOW',note:`Verify annual Roth contribution limit. Generates ${fc(rem*CC_ROTH/100)}/yr tax-free`});
+  }
+
+  if(dT>0){
+    const capNeeded=(dT/muniEy)*100;
+    const lowTaxable=allPos.filter(p=>p.taxTreatment==='taxable'&&(p.estimatedYield||0)<1.5&&p.assetClass!=='Cash').sort((a,b)=>(a.estimatedYield||0)-(b.estimatedYield||0));
+    let rem=capNeeded;
+    for(const p of lowTaxable){
+      if(rem<=0)break;
+      const sa=Math.min(rem,p.value);
+      const ig=+(sa*(muniEy-(p.estimatedYield||0))/100).toFixed(0);
+      actionItems.push({group:'Income Gap — Taxable',action:'SELL',holding:p.symbol,desc:(p.description||p.symbol).slice(0,50),account:p.accountName,value:sa,incGain:null,priority:'MEDIUM',note:`${fp(p.estimatedYield||0)} yield → reinvest in munis at ${fp(muniEy)}% (TEY: ${fp(tey(muniEy))}%)`});
+      actionItems.push({group:'Income Gap — Taxable',action:'BUY',holding:muniSym,desc:`${muniDesc}`,account:p.accountName,value:sa,incGain:ig,priority:'MEDIUM',note:`+${fc(ig)}/yr after-tax income · TEY: ${fp(tey(muniEy))}%`});
+      rem-=sa;
+    }
+    if(rem>0) actionItems.push({group:'Income Gap — Taxable',action:'DEPOSIT',holding:muniSym,desc:`${muniDesc} — new taxable deposit`,account:taxableAcct,value:rem,incGain:+(rem*muniEy/100).toFixed(0),priority:'LOW',note:`TEY: ${fp(tey(muniEy))}% · generates ${fc(rem*muniEy/100)}/yr`});
+  }
+
+  return {
+    strategies,assetLocDiags,actionItems,
+    dF,dD,dT,
+    curF:ib['tax-free'],curD:ib['tax-deferred'],curT:ib.taxable,
+    tF,tD,tT,
+    taxProfile:{stateCode,fedRate,stateRate,combined,stateData:sd,filing},
+    inputs:{free:tF,deferred:tD,taxable:tT,strategies:strats,excludeTF:exTF}
+  };
+}
+
+function renderActionTable(items){
+  if(!items||items.length===0)return '';
+  // Group by group label
+  const groups={};
+  items.forEach(it=>{
+    if(!groups[it.group])groups[it.group]=[];
+    groups[it.group].push(it);
+  });
+  const actionColor={
+    'SELL':'var(--rose)',
+    'BUY':'var(--emerald)',
+    'DEPOSIT':'var(--amber)',
+    'CONVERT':'var(--purple)',
+  };
+  const actionBg={
+    'SELL':'var(--rose-l)',
+    'BUY':'var(--emerald-l)',
+    'DEPOSIT':'var(--amber-l)',
+    'CONVERT':'var(--purple-l)',
+  };
+  const groupIcon={
+    'Asset Location Fix':'🔀',
+    'Roth Conversion':'🔄',
+    'Income Gap — Tax-Deferred':'🏛️',
+    'Income Gap — Tax-Free':'🌿',
+    'Income Gap — Taxable':'💸',
+  };
+  const rows=Object.entries(groups).map(([grp,its])=>{
+    const rowsHtml=its.map((it,i)=>{
+      const ac=it.action.split(' ')[0]; // 'SELL','BUY','DEPOSIT','CONVERT'
+      const clr=actionColor[ac]||'var(--text)';
+      const bg=i%2===0?'':'background:var(--surface2);';
+      return `<tr style="${bg}">
+        <td style="padding:7px 10px">
+          <span style="background:${actionColor[ac]};color:#fff;font-size:10px;font-weight:800;padding:2px 8px;border-radius:20px;white-space:nowrap">${it.action}</span>
+        </td>
+        <td style="padding:7px 10px;font-weight:700;font-family:monospace;color:var(--blue);font-size:13px;white-space:nowrap">${it.holding}</td>
+        <td style="padding:7px 10px;font-size:12px;color:var(--text2)">${it.desc}</td>
+        <td style="padding:7px 10px;font-size:12px;color:var(--text3);white-space:nowrap">${it.account}</td>
+        <td style="padding:7px 10px;text-align:right;font-weight:700;white-space:nowrap;color:${clr}">${fc(it.value)}</td>
+        <td style="padding:7px 10px;text-align:right;font-size:12px;font-weight:600;white-space:nowrap;color:var(--emerald)">${it.incGain?'+'+fc(it.incGain)+'/yr':ac==='SELL'?'—':''}</td>
+        <td style="padding:7px 10px;font-size:11px;color:var(--text3)">${it.note||''}</td>
+      </tr>`;
+    }).join('');
+    return `
+      <tr style="background:var(--surface2)">
+        <td colspan="7" style="padding:8px 10px;font-weight:800;font-size:12px;color:var(--text);border-top:2px solid var(--border)">${groupIcon[grp]||'📌'} ${grp}</td>
+      </tr>
+      ${rowsHtml}`;
+  }).join('');
+
+  const totalSells=items.filter(i=>i.action==='SELL').reduce((s,i)=>s+i.value,0);
+  const totalBuys=items.filter(i=>i.action==='BUY'||i.action==='DEPOSIT').reduce((s,i)=>s+i.value,0);
+  const totalIncome=items.filter(i=>i.incGain&&(i.action==='BUY'||i.action==='DEPOSIT')).reduce((s,i)=>s+(i.incGain||0),0);
+
+  return `
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-hdr" style="justify-content:space-between">
+      <div class="card-title">📋 Trade Action Plan</div>
+      <div style="display:flex;gap:16px;font-size:12px">
+        <span style="color:var(--rose)">Sell: <strong>${fc(totalSells)}</strong></span>
+        <span style="color:var(--emerald)">Buy/Deploy: <strong>${fc(totalBuys)}</strong></span>
+        <span style="color:var(--emerald)">Income Added: <strong>+${fc(totalIncome)}/yr</strong></span>
+      </div>
+    </div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="border-bottom:2px solid var(--border);background:var(--surface2)">
+            <th style="padding:8px 10px;text-align:left;font-size:11px;font-weight:700;color:var(--text3);white-space:nowrap">Action</th>
+            <th style="padding:8px 10px;text-align:left;font-size:11px;font-weight:700;color:var(--text3)">Holding</th>
+            <th style="padding:8px 10px;text-align:left;font-size:11px;font-weight:700;color:var(--text3)">Description</th>
+            <th style="padding:8px 10px;text-align:left;font-size:11px;font-weight:700;color:var(--text3)">Account</th>
+            <th style="padding:8px 10px;text-align:right;font-size:11px;font-weight:700;color:var(--text3)">Value</th>
+            <th style="padding:8px 10px;text-align:right;font-size:11px;font-weight:700;color:var(--text3);white-space:nowrap">Est. Income</th>
+            <th style="padding:8px 10px;text-align:left;font-size:11px;font-weight:700;color:var(--text3)">Notes</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+        <tfoot>
+          <tr style="border-top:2px solid var(--border);background:var(--surface2)">
+            <td colspan="4" style="padding:8px 10px;font-weight:700;font-size:12px">Totals</td>
+            <td style="padding:8px 10px;text-align:right;font-weight:800;font-size:13px"></td>
+            <td style="padding:8px 10px;text-align:right;font-weight:800;color:var(--emerald);font-size:13px">+${fc(totalIncome)}/yr</td>
+            <td style="padding:8px 10px;font-size:11px;color:var(--text3)">Estimated incremental annual income from all BUY actions</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+    <div style="padding:10px 14px;background:var(--amber-l);border-top:1px solid var(--border);font-size:11px;color:var(--text2)">
+      ⚠️ <strong>Important:</strong> Share quantities not shown — calculate at time of execution using current market prices. SELL actions may trigger capital gains tax in taxable accounts — consult a tax advisor before executing. DEPOSIT actions require verifying IRS annual contribution limits.
+    </div>
+  </div>`;
+}
+
+function renderPlanResults(r){
+  const tp=r.taxProfile;
+  const priColor={HIGH:'var(--rose)',MEDIUM:'var(--amber)',LOW:'var(--text3)'};
+  const priLabel={HIGH:'HIGH PRIORITY',MEDIUM:'RECOMMENDED',LOW:'OPTIONAL'};
+
+  // ── strategy card builder ──────────────────────────────────────────
+  const stratCard=(s)=>{
+    const instrRows=s.instruments.map(inst=>`
+      <tr>
+        <td style="padding:6px 8px;font-weight:700;font-family:monospace;color:var(--blue);white-space:nowrap">${inst.t}</td>
+        <td style="padding:6px 8px;color:var(--text2);font-size:12px">${inst.d}</td>
+        <td style="padding:6px 8px;text-align:right;white-space:nowrap"><span style="font-weight:700;color:var(--emerald)">${fp(inst.ey)}</span></td>
+        <td style="padding:6px 8px;text-align:right;white-space:nowrap;font-weight:600;color:var(--blue-d);font-size:12px">${inst.teyStr||''}</td>
+        <td style="padding:6px 8px;color:var(--text3);font-size:11px">${inst.note||''}</td>
+      </tr>`).join('');
+    const caveatHtml=s.caveats&&s.caveats.length?`
+      <details style="margin-top:12px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--text2);user-select:none">⚠️ Caveats & Risks (${s.caveats.length})</summary>
+        <ul style="margin:8px 0 0 16px;font-size:12px;color:var(--text2);line-height:1.7">${s.caveats.map(c=>`<li>${c}</li>`).join('')}</ul>
+      </details>`:'';
+    return `
+    <div style="border:1px solid var(--border);border-radius:var(--r-sm);margin-bottom:10px;overflow:hidden">
+      <div style="padding:10px 14px;background:var(--surface2);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+        <div>
+          <div style="font-weight:700;font-size:13px;display:flex;align-items:center;gap:6px">${s.icon} ${s.title}</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:2px">${s.tagline}</div>
+        </div>
+        <span style="background:${priColor[s.priority]};color:#fff;font-size:10px;font-weight:800;padding:2px 8px;border-radius:20px;white-space:nowrap;flex-shrink:0">${priLabel[s.priority]}</span>
+      </div>
+      <div style="padding:12px 14px">
+        <p style="font-size:12px;color:var(--text);line-height:1.65;margin-bottom:10px">${s.body}</p>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr style="border-bottom:2px solid var(--border)">
+              <th style="padding:4px 8px;text-align:left;font-size:11px;color:var(--text3)">Ticker</th>
+              <th style="padding:4px 8px;text-align:left;font-size:11px;color:var(--text3)">Fund / Instrument</th>
+              <th style="padding:4px 8px;text-align:right;font-size:11px;color:var(--text3)">Est. Yield</th>
+              <th style="padding:4px 8px;text-align:right;font-size:11px;color:var(--text3)">Tax Treatment</th>
+              <th style="padding:4px 8px;text-align:left;font-size:11px;color:var(--text3)">Notes</th>
+            </tr></thead>
+            <tbody>${instrRows}</tbody>
+          </table>
+        </div>
+        ${caveatHtml}
+      </div>
+    </div>`;
+  };
+
+  // ── section header ─────────────────────────────────────────────────
+  const secHdr=(icon,title,color,subtext)=>`
+    <div style="display:flex;align-items:center;gap:8px;margin:18px 0 10px;padding-bottom:8px;border-bottom:2px solid ${color}">
+      <span style="font-size:20px">${icon}</span>
+      <div><div style="font-weight:800;font-size:14px;color:var(--text)">${title}</div><div style="font-size:11px;color:var(--text3)">${subtext}</div></div>
+    </div>`;
+
+  // ── income gap row ─────────────────────────────────────────────────
+  const gapRow=(icon,lbl,cur,tar,def,clr)=>tar<=0?'':
+    `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--border)">
+      <div style="font-size:13px;font-weight:600">${icon} ${lbl}</div>
+      <div style="display:flex;gap:16px;align-items:center">
+        <span style="font-size:12px;color:var(--text3)">Current: <strong style="color:var(--text)">${fc(cur)}</strong></span>
+        <span style="font-size:12px;color:var(--text3)">Target: <strong style="color:var(--text)">${fc(tar)}</strong></span>
+        <span style="font-weight:800;font-size:13px;color:${def>0?'var(--rose)':'var(--emerald)'}">${def>0?'Gap: '+fc(def):'✓ Met'}</span>
+      </div>
+    </div>`;
+
+  // ── asset location diag card ───────────────────────────────────────
+  const diagCard=(d)=>{
+    const bg=d.severity==='HIGH'?'var(--rose-l)':d.severity==='MEDIUM'?'var(--amber-l)':'var(--sky-l)';
+    return `
+    <div style="border:1px solid ${d.severity==='HIGH'?'var(--rose)':'var(--amber)'};border-radius:var(--r-sm);padding:12px 14px;margin-bottom:8px;background:${bg}">
+      <div style="font-weight:700;font-size:13px;margin-bottom:4px">${d.icon} ${d.title}</div>
+      <div style="font-size:12px;margin-bottom:6px"><strong>Issue:</strong> ${d.issue}</div>
+      <div style="font-size:12px;margin-bottom:4px"><strong>Why it matters:</strong> ${d.why}</div>
+      <div style="font-size:12px;color:var(--emerald-d)"><strong>✅ Action:</strong> ${d.fix}</div>
+    </div>`;
+  };
+
+  // ── tax profile banner ─────────────────────────────────────────────
+  const tp2=r.taxProfile;
+  const profileBanner=`
+    <div style="background:var(--blue-l);border:1px solid var(--blue);border-radius:var(--r-sm);padding:10px 14px;margin-bottom:16px;font-size:12px">
+      <strong>Tax Profile:</strong> ${tp2.stateData.name} · ${Math.round(tp2.fedRate*100)}% federal bracket · ${Math.round(tp2.stateRate*100)}% state · ${Math.round(tp2.combined*100)}% combined marginal rate · ${r.inputs.filing}
+      ${tp2.stateRate>0?` &nbsp;|&nbsp; <strong>Muni TEY example:</strong> ${fp(tp2.stateData.etfs[0]?.ey||3.2)}% ${tp2.stateData.name} muni = <strong>${fp((tp2.stateData.etfs[0]?.ey||3.2)/(1-tp2.combined))}% taxable equiv</strong>` : ' &nbsp;|&nbsp; <strong>No state income tax</strong> — T-bills > munis for state savings'}
+    </div>`;
+
+  const strats=r.strategies;
+  const hasStrats=(b)=>strats[b]&&strats[b].length>0;
+  const diagsHtml=r.assetLocDiags&&r.assetLocDiags.length>0
+    ?`${secHdr('🔍','Asset Location Issues Found','var(--rose)','Move these assets to eliminate avoidable tax drag')}
+       ${r.assetLocDiags.map(diagCard).join('')}`
+    :`<div style="background:var(--emerald-l);border:1px solid var(--emerald);border-radius:var(--r-sm);padding:10px 14px;font-size:12px;font-weight:600;color:var(--emerald-d)">✅ No critical asset location issues detected in your current portfolio.</div>`;
+
+  return `
+  ${profileBanner}
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-hdr"><div class="card-title">📊 Income Gap Analysis</div></div>
+    <div class="card-body" style="padding-top:6px">
+      ${gapRow('🌿','Tax-Free (Roth/HSA + Munis)',r.curF,r.tF,r.dF,'var(--sky)')}
+      ${gapRow('🏛️','Tax-Deferred (IRA/401k)',r.curD,r.tD,r.dD,'var(--purple)')}
+      ${gapRow('💸','Taxable (Brokerage)',r.curT,r.tT,r.dT,'var(--amber)')}
+      ${r.tF+r.tD+r.tT===0?'<div class="alert alert-success" style="margin-top:10px">✅ Targets met across all buckets.</div>':''}
+    </div>
+  </div>
+
+  ${r.actionItems&&r.actionItems.length>0?renderActionTable(r.actionItems):''}
+
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-hdr"><div class="card-title">🔍 Asset Location Diagnostics</div></div>
+    <div class="card-body">${diagsHtml}</div>
+  </div>
+
+  ${hasStrats('taxable')?`
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-hdr"><div class="card-title">💸 Taxable Account Strategies</div><span style="font-size:11px;color:var(--text3)">Brokerage · Savings · After-tax</span></div>
+    <div class="card-body">
+      ${secHdr('💸','Taxable Account','var(--amber)','Tax-efficient instruments for brokerage and savings accounts')}
+      ${strats.taxable.map(stratCard).join('')}
+    </div>
+  </div>`:''}
+
+  ${hasStrats('taxDeferred')?`
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-hdr"><div class="card-title">🏛️ Tax-Deferred Account Strategies</div><span style="font-size:11px;color:var(--text3)">Traditional IRA · 401(k) · SEP-IRA</span></div>
+    <div class="card-body">
+      ${secHdr('🏛️','Tax-Deferred (IRA/401k)','var(--purple)','High-yield, non-qualified income sheltered from current taxation')}
+      ${strats.taxDeferred.map(stratCard).join('')}
+    </div>
+  </div>`:''}
+
+  ${hasStrats('taxFree')?`
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-hdr"><div class="card-title">🌿 Tax-Free Account Strategies</div><span style="font-size:11px;color:var(--text3)">Roth IRA · HSA · 529</span></div>
+    <div class="card-body">
+      ${secHdr('🌿','Tax-Free (Roth/HSA)','var(--emerald)','Every dollar of income is permanently tax-free — maximize yield here')}
+      ${strats.taxFree.map(stratCard).join('')}
+    </div>
+  </div>`:''}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// EMPTY STATE
+// ─────────────────────────────────────────────────────────────────────
+function emptyState(icon,title,sub){
+  return `<div class="empty"><div class="empty-icon">${icon}</div><div class="empty-title">${title}</div><div class="empty-sub">${sub}</div><div style="margin-top:14px"><button class="btn btn-primary" onclick="switchTab('ingestion')">Go to Accounts</button></div></div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// INIT
+// ─────────────────────────────────────────────────────────────────────
+function init(){
+  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  renderIngestion();
+  document.addEventListener('keydown',e=>{
+    if(e.key==='Escape'&&reviewQueue.length) skipReview();
+    if(e.key==='Escape'&&document.getElementById('pin-setup-bg')?.style.display==='flex') skipPinSetup();
+  });
+  // Check for existing encrypted session on load
+  if (localStorage.getItem(_SKEY)) {
+    showLockScreen();
+  }
+}
+init();
+</script>
+</body>
+</html>

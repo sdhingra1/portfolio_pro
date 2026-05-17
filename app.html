@@ -838,7 +838,7 @@ async function saveSession() {
   const ct   = await crypto.subtle.encrypt({name:'AES-GCM',iv}, key, new TextEncoder().encode(JSON.stringify(payload)));
   localStorage.setItem(_SKEY, JSON.stringify({
     v:2, salt:_b64e(salt), iv:_b64e(iv), data:_b64e(ct),
-    ts:Date.now(), acct:S.accounts.length
+    ts:Date.now(), acct:S.accounts.length, rental:(S.rentalProperties||[]).length
   }));
   updateNavSession();
 }
@@ -887,8 +887,9 @@ function showLockScreen() {
   if (raw) {
     const m = JSON.parse(raw);
     const d = new Date(m.ts);
+    const rentalPart = m.rental > 0 ? ` · ${m.rental} rental propert${m.rental===1?'y':'ies'}` : '';
     document.getElementById('lock-meta').textContent =
-      `Last saved: ${d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})} at ${d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})} · ${m.acct||'?'} account(s)`;
+      `Last saved: ${d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})} at ${d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})} · ${m.acct||'?'} account(s)${rentalPart}`;
   }
   el.style.display = 'flex';
   setTimeout(() => document.getElementById('lock-pin')?.focus(), 120);
@@ -979,7 +980,7 @@ async function importBackupFile(evt) {
 function updateNavSession() {
   const ns = document.getElementById('nav-session');
   const hasSaved = !!localStorage.getItem(_SKEY);
-  const active = S.accounts.length > 0 || hasSaved;
+  const active = S.accounts.length > 0 || (S.rentalProperties||[]).length > 0 || hasSaved;
   if (ns) ns.style.display = active ? 'flex' : 'none';
   const lbl = document.getElementById('nsb-label');
   const btn = document.getElementById('nsb-status');
@@ -3417,7 +3418,12 @@ function addRentalProperty(){
   const mortgageBalance=parseFloat(document.getElementById('rp-mortgagebal').value)||0;
   const prop={id:'rp_'+Date.now(),name,annualRent:rent*12,vacancyRate:parseFloat(document.getElementById('rp-vacancy').value)||0,propertyValue,mortgageBalance,expenses};
   S.rentalProperties=[...(S.rentalProperties||[]),prop];
-  saveSession();
+  if (S.sessionPin) {
+    saveSession();
+  } else if (!localStorage.getItem(_SKEY)) {
+    setTimeout(showPinSetup, 400); // First time — prompt for PIN
+  }
+  updateNavSession();
   // Reset form
   ['rp-name','rp-rent','rp-propvalue','rp-mortgagebal'].forEach(id=>document.getElementById(id).value='');
   document.getElementById('rp-vacancy').value='5';
@@ -3431,7 +3437,8 @@ function deleteRentalProperty(id){
   const p=S.rentalProperties.find(x=>x.id===id);
   if(!confirm(`Remove "${p?.name||'this property'}"?`)) return;
   S.rentalProperties=S.rentalProperties.filter(x=>x.id!==id);
-  saveSession();
+  if(S.sessionPin) saveSession();
+  updateNavSession();
   renderRealEstate();
   toast('Property removed');
 }

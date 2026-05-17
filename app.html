@@ -282,10 +282,28 @@ hr.dv{border:none;border-top:1px solid var(--border);margin:13px 0;}
 .inp-sfx .input{padding-right:26px;}
 .inp-sfx-lbl{position:absolute;right:9px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:13px;pointer-events:none;}
 
+/* RENTAL PROPERTY */
+.rental-prop-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);margin-bottom:10px;overflow:hidden;box-shadow:var(--sh);}
+.rental-prop-hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:linear-gradient(90deg,rgba(16,185,129,.07),transparent);border-bottom:1px solid var(--border);}
+.rental-prop-name{font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px;}
+.rental-prop-body{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border-top:none;}
+.rental-prop-col{padding:12px 16px;border-right:1px solid var(--border);}
+.rental-prop-col:last-child{border-right:none;}
+.rental-prop-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);margin-bottom:3px;}
+.rental-prop-val{font-size:16px;font-weight:800;letter-spacing:-.4px;}
+.rental-noi-pos{color:var(--emerald);}
+.rental-noi-neg{color:var(--rose);}
+.rental-summary-bar{background:linear-gradient(90deg,var(--emerald-l),var(--blue-l));border-radius:var(--r);padding:16px 20px;display:flex;gap:32px;align-items:center;flex-wrap:wrap;margin-bottom:16px;}
+.rental-sum-item{text-align:center;}
+.rental-sum-val{font-size:20px;font-weight:800;letter-spacing:-.4px;}
+.rental-sum-lbl{font-size:11px;color:var(--text2);font-weight:600;margin-top:2px;}
+
 @media(max-width:768px){
   .g2,.g3,.g4,.g12,.g13,.g32{grid-template-columns:1fr;}
   .nav{overflow-x:auto;padding:0 10px;}
   .content{padding:12px;}
+  .rental-prop-body{grid-template-columns:1fr;}
+  .rental-prop-col{border-right:none;border-bottom:1px solid var(--border);}
 }
 </style>
 </head>
@@ -294,7 +312,8 @@ hr.dv{border:none;border-top:1px solid var(--border);margin:13px 0;}
 <nav class="nav">
   <div class="nav-brand">💼 Portfolio<em>Pro</em></div>
   <div class="nav-tab active" id="ntab-ingestion" onclick="switchTab('ingestion')">📂 Investment Accounts</div>
-  <div class="nav-tab" id="ntab-allocation" onclick="switchTab('allocation')">📊 Current Asset Allocation</div>
+  <div class="nav-tab" id="ntab-realestate" onclick="switchTab('realestate')">🏠 Rental Properties</div>
+  <div class="nav-tab" id="ntab-allocation" onclick="switchTab('allocation')">📊 Asset Allocation</div>
   <div class="nav-tab" id="ntab-income" onclick="switchTab('income')">💵 Current Income</div>
   <div class="nav-tab" id="ntab-optimizer" onclick="switchTab('optimizer')">⚖️ Target Allocation Planning</div>
   <div class="nav-tab" id="ntab-planner" onclick="switchTab('planner')">🎯 Target Income Planning</div>
@@ -459,6 +478,12 @@ hr.dv{border:none;border-top:1px solid var(--border);margin:13px 0;}
   <div class="tab-panel" id="panel-planner">
     <div class="sec-hdr"><div class="sec-title">Target Income Planner</div><div class="sec-sub">Calculate the exact moves needed to reach your income goals per tax bucket</div></div>
     <div id="planner-content"></div>
+  </div>
+
+  <!-- TAB 6 -->
+  <div class="tab-panel" id="panel-realestate">
+    <div class="sec-hdr"><div class="sec-title">Rental Properties</div><div class="sec-sub">Manually enter rental income and expenses — net income flows into your total income picture</div></div>
+    <div id="realestate-content"></div>
   </div>
 
 </div><!-- /content -->
@@ -779,8 +804,8 @@ const BUY_SIGS = {
 // ─────────────────────────────────────────────────────────────────────
 // STATE
 // ─────────────────────────────────────────────────────────────────────
-const S = { accounts:[], activeTab:'ingestion', optimizerResult:null, plannerResult:null, sessionPin:null };
-let allocChart = null;
+const S = { accounts:[], rentalProperties:[], activeTab:'ingestion', optimizerResult:null, plannerResult:null, sessionPin:null };
+let allocChart = null, allocChart2 = null;
 let reviewQueue = [];
 let reviewIdx = 0;
 let procItems = []; // [{name, status, result}]
@@ -804,13 +829,15 @@ async function _deriveKey(pin, salt) {
 }
 
 async function saveSession() {
-  if (!S.sessionPin || !S.accounts.length) return;
+  if (!S.sessionPin) return;
+  if (!S.accounts.length && !(S.rentalProperties||[]).length) return;
+  const payload = { accounts: S.accounts, rentalProperties: S.rentalProperties || [] };
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv   = crypto.getRandomValues(new Uint8Array(12));
   const key  = await _deriveKey(S.sessionPin, salt);
-  const ct   = await crypto.subtle.encrypt({name:'AES-GCM',iv}, key, new TextEncoder().encode(JSON.stringify(S.accounts)));
+  const ct   = await crypto.subtle.encrypt({name:'AES-GCM',iv}, key, new TextEncoder().encode(JSON.stringify(payload)));
   localStorage.setItem(_SKEY, JSON.stringify({
-    v:1, salt:_b64e(salt), iv:_b64e(iv), data:_b64e(ct),
+    v:2, salt:_b64e(salt), iv:_b64e(iv), data:_b64e(ct),
     ts:Date.now(), acct:S.accounts.length
   }));
   updateNavSession();
@@ -826,7 +853,14 @@ async function unlockSession() {
   try {
     const key = await _deriveKey(pin, _b64d(stored.salt));
     const pt  = await crypto.subtle.decrypt({name:'AES-GCM', iv:_b64d(stored.iv)}, key, _b64d(stored.data));
-    S.accounts = JSON.parse(new TextDecoder().decode(pt));
+    const decoded = JSON.parse(new TextDecoder().decode(pt));
+    if (Array.isArray(decoded)) {
+      // v1 format — accounts only
+      S.accounts = decoded; S.rentalProperties = [];
+    } else {
+      // v2 format — accounts + rentalProperties
+      S.accounts = decoded.accounts || []; S.rentalProperties = decoded.rentalProperties || [];
+    }
     S.sessionPin = pin;
     errEl.textContent = '';
     hideLockScreen();
@@ -840,7 +874,7 @@ async function unlockSession() {
 }
 
 function lockSession() {
-  S.accounts = []; S.sessionPin = null; S.plannerResult = null; S.optimizerResult = null;
+  S.accounts = []; S.rentalProperties = []; S.sessionPin = null; S.plannerResult = null; S.optimizerResult = null;
   renderIngestion(); switchTab('ingestion');
   showLockScreen();
   toast('Session locked — data cleared from memory', 'warn');
@@ -869,7 +903,7 @@ function hideLockScreen() {
 function clearSessionConfirm() {
   if (!confirm('Permanently delete all saved data and start over?\n\nThis cannot be undone.')) return;
   localStorage.removeItem(_SKEY);
-  S.accounts = []; S.sessionPin = null; S.plannerResult = null; S.optimizerResult = null;
+  S.accounts = []; S.rentalProperties = []; S.sessionPin = null; S.plannerResult = null; S.optimizerResult = null;
   hideLockScreen(); renderIngestion(); updateNavSession();
   toast('All saved data cleared', 'warn');
 }
@@ -1921,9 +1955,16 @@ function calcStats(){
   }
   incByAcct.sort((a,b)=>b.income-a.income);
   const wy = tv>0?wyn/tv:0;
-  const ti = Object.values(incBkt).reduce((s,v)=>s+v,0);
+  const tiInv = Object.values(incBkt).reduce((s,v)=>s+v,0);
+  // Rental net income (treated as taxable for planning purposes)
+  const rentalIncome = (S.rentalProperties||[]).reduce((s,p)=>{
+    const gross = (p.annualRent||0)*(1-(p.vacancyRate||0)/100);
+    const exp = Object.values(p.expenses||{}).reduce((a,b)=>a+(parseFloat(b)||0),0);
+    return s+Math.max(0,gross-exp);
+  },0);
+  const ti = tiInv + rentalIncome;
   const scSorted = Object.entries(scBrk).sort((a,b)=>b[1]-a[1]);
-  return {tv,acBrk,scBrk:scSorted,txBrk,incBkt,incByAcct,wy,ti,allPos,
+  return {tv,acBrk,scBrk:scSorted,txBrk,incBkt,incByAcct,wy,ti,tiInv,rentalIncome,allPos,
           na:S.accounts.length,np:allPos.length};
 }
 
@@ -1945,6 +1986,7 @@ function renderActive(){
   if(t==='income') renderIncome();
   if(t==='optimizer') renderOptimizer();
   if(t==='planner') renderPlanner();
+  if(t==='realestate') renderRealEstate();
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2027,22 +2069,31 @@ function renderAllocation(){
   const st=calcStats();
   if(!st){el.innerHTML=emptyState('📊','No Portfolio Data','Upload statements in Accounts tab first.');return;}
   const {tv,acBrk,scBrk,txBrk}=st;
+  // Rental equity for second chart
+  const rentalEquity=(S.rentalProperties||[]).reduce((s,p)=>s+Math.max(0,(p.propertyValue||0)-(p.mortgageBalance||0)),0);
+  const totalWealth=tv+rentalEquity;
+  const hasRealEstate=rentalEquity>0;
 
   el.innerHTML=`
   <div class="grid g4" style="margin-bottom:18px;">
-    <div class="metric"><div class="metric-icon">💰</div><div class="metric-label">Total Portfolio</div><div class="metric-value" style="color:var(--blue)">${fc(tv)}</div><div class="metric-sub">${st.na} accounts · ${st.np} positions</div></div>
+    <div class="metric"><div class="metric-icon">💰</div><div class="metric-label">Investment Portfolio</div><div class="metric-value" style="color:var(--blue)">${fc(tv)}</div><div class="metric-sub">${st.na} accounts · ${st.np} positions</div></div>
     <div class="metric"><div class="metric-icon">📈</div><div class="metric-label">Stocks</div><div class="metric-value" style="color:#3b82f6">${fp((acBrk.Stocks||0)/tv*100)}</div><div class="metric-sub">${fc(acBrk.Stocks||0)}</div></div>
     <div class="metric"><div class="metric-icon">🏦</div><div class="metric-label">Bonds</div><div class="metric-value" style="color:var(--purple)">${fp((acBrk.Bonds||0)/tv*100)}</div><div class="metric-sub">${fc(acBrk.Bonds||0)}</div></div>
     <div class="metric"><div class="metric-icon">💵</div><div class="metric-label">Cash</div><div class="metric-value" style="color:var(--emerald)">${fp((acBrk.Cash||0)/tv*100)}</div><div class="metric-sub">${fc(acBrk.Cash||0)}</div></div>
   </div>
-  <div class="grid g32" style="margin-bottom:18px;">
+  ${hasRealEstate?`<div class="metric" style="margin-bottom:18px;border-top:3px solid var(--sky);display:flex;align-items:center;gap:18px;">
+    <div><div class="metric-icon">🏠</div></div>
+    <div><div class="metric-label">Total Wealth (incl. Real Estate)</div><div class="metric-value" style="color:var(--sky)">${fc(totalWealth)}</div></div>
+    <div style="margin-left:auto;text-align:right"><div style="font-size:12px;color:var(--text3)">Rental Equity</div><div style="font-size:18px;font-weight:800;color:var(--sky)">${fc(rentalEquity)}</div></div>
+  </div>`:''}
+  <div class="grid g2" style="margin-bottom:18px;">
     <div class="card">
-      <div class="card-hdr"><div class="card-title">📊 Asset Class Breakdown</div></div>
+      <div class="card-hdr"><div class="card-title">📊 Investment Portfolio Allocation</div><span style="font-size:11px;color:var(--text3)">Stocks · Bonds · Cash</span></div>
       <div class="card-body">
         <div class="donut-wrap">
           <div class="donut-canvas-wrap">
             <canvas id="donut-chart" width="160" height="160"></canvas>
-            <div class="donut-center"><div class="donut-center-val">${fc(tv)}</div><div class="donut-center-label">Portfolio</div></div>
+            <div class="donut-center"><div class="donut-center-val" style="font-size:14px">${fc(tv)}</div><div class="donut-center-label">Portfolio</div></div>
           </div>
           <div class="donut-legend">
             ${['Stocks','Bonds','Cash','Mixed'].filter(k=>acBrk[k]>0).map(k=>`
@@ -2055,6 +2106,37 @@ function renderAllocation(){
       </div>
     </div>
     <div class="card">
+      <div class="card-hdr"><div class="card-title">🏘️ Total Wealth Allocation</div><span style="font-size:11px;color:var(--text3)">${hasRealEstate?'Stocks · Bonds · Cash · Real Estate':'Add rental properties to see total wealth'}</span></div>
+      <div class="card-body">
+        ${hasRealEstate?`
+        <div class="donut-wrap">
+          <div class="donut-canvas-wrap">
+            <canvas id="donut-chart-2" width="160" height="160"></canvas>
+            <div class="donut-center"><div class="donut-center-val" style="font-size:14px">${fc(totalWealth)}</div><div class="donut-center-label">Total Wealth</div></div>
+          </div>
+          <div class="donut-legend">
+            ${['Stocks','Bonds','Cash','Mixed'].filter(k=>acBrk[k]>0).map(k=>`
+              <div class="legend-item">
+                <div class="legend-left"><div class="legend-dot" style="background:${AC_COLORS[k]}"></div>${k}</div>
+                <div><strong>${fp(acBrk[k]/totalWealth*100)}</strong> <span style="font-size:11px;color:var(--text3)">${fc(acBrk[k])}</span></div>
+              </div>`).join('')}
+            <div class="legend-item">
+              <div class="legend-left"><div class="legend-dot" style="background:#0ea5e9"></div>Real Estate</div>
+              <div><strong>${fp(rentalEquity/totalWealth*100)}</strong> <span style="font-size:11px;color:var(--text3)">${fc(rentalEquity)}</span></div>
+            </div>
+          </div>
+        </div>`:`
+        <div class="empty" style="padding:32px 16px">
+          <div class="empty-icon" style="font-size:36px">🏠</div>
+          <div class="empty-title" style="font-size:14px">No Rental Equity Yet</div>
+          <div class="empty-sub">Add a rental property with market value and mortgage balance in the <strong>Rental Properties</strong> tab to see your total wealth picture here.</div>
+          <div style="margin-top:12px"><button class="btn btn-primary btn-sm" onclick="switchTab('realestate')">Go to Rental Properties</button></div>
+        </div>`}
+      </div>
+    </div>
+  </div>
+  <div class="grid g32" style="margin-bottom:18px;">
+    <div class="card">
       <div class="card-hdr"><div class="card-title">🔍 Sub-Class Breakdown</div></div>
       <div class="card-body">
         ${scBrk.slice(0,10).map(([sc,v])=>`<div class="pr-row">
@@ -2065,27 +2147,47 @@ function renderAllocation(){
         </div>`).join('')}
       </div>
     </div>
-  </div>
-  <div class="card">
-    <div class="card-hdr"><div class="card-title">🏛️ Account Breakdown</div></div>
-    <div class="card-body">
-      ${S.accounts.map(a=>`<div class="pr-row">
-        <div class="pr-label" style="min-width:170px">${a.name}</div>
-        <div class="pr-track"><div class="pr-fill" style="width:${clamp(a.totalBalance/tv*100,0,100)}%;background:${TX_COLORS[a.taxTreatment]}"></div></div>
-        <div class="pr-pct">${fp(a.totalBalance/tv*100)}</div>
-        <div class="pr-val">${fc(a.totalBalance)}</div>
-      </div>`).join('')}
+    <div class="card">
+      <div class="card-hdr"><div class="card-title">🏛️ Account Breakdown</div></div>
+      <div class="card-body">
+        ${S.accounts.map(a=>`<div class="pr-row">
+          <div class="pr-label" style="min-width:170px">${a.name}</div>
+          <div class="pr-track"><div class="pr-fill" style="width:${clamp(a.totalBalance/tv*100,0,100)}%;background:${TX_COLORS[a.taxTreatment]}"></div></div>
+          <div class="pr-pct">${fp(a.totalBalance/tv*100)}</div>
+          <div class="pr-val">${fc(a.totalBalance)}</div>
+        </div>`).join('')}
+        ${hasRealEstate?(S.rentalProperties||[]).filter(p=>(p.propertyValue||0)>0).map(p=>`<div class="pr-row">
+          <div class="pr-label" style="min-width:170px">🏠 ${p.name}</div>
+          <div class="pr-track"><div class="pr-fill" style="width:${clamp(Math.max(0,(p.propertyValue||0)-(p.mortgageBalance||0))/totalWealth*100,0,100)}%;background:#0ea5e9"></div></div>
+          <div class="pr-pct">${fp(Math.max(0,(p.propertyValue||0)-(p.mortgageBalance||0))/totalWealth*100)}</div>
+          <div class="pr-val">${fc(Math.max(0,(p.propertyValue||0)-(p.mortgageBalance||0)))}</div>
+        </div>`).join(''):''}
+      </div>
     </div>
   </div>`;
 
   setTimeout(()=>{
-    const canvas=document.getElementById('donut-chart');
-    if(!canvas) return;
-    if(allocChart){allocChart.destroy();allocChart=null;}
-    const labels=[],data=[],colors=[];
-    for(const k of ['Stocks','Bonds','Cash','Mixed']) if(acBrk[k]>0){labels.push(k);data.push(acBrk[k]);colors.push(AC_COLORS[k]);}
-    allocChart=new Chart(canvas,{type:'doughnut',data:{labels,datasets:[{data,backgroundColor:colors,borderWidth:2,borderColor:'#fff',hoverOffset:5}]},
-      options:{cutout:'68%',plugins:{legend:{display:false},tooltip:{callbacks:{label:i=>`${i.label}: ${fc(i.raw)} (${fp(i.raw/tv*100)})`}}},animation:{duration:450}}});
+    // Chart 1: Investment portfolio
+    const c1=document.getElementById('donut-chart');
+    if(c1){
+      if(allocChart){allocChart.destroy();allocChart=null;}
+      const l1=[],d1=[],col1=[];
+      for(const k of ['Stocks','Bonds','Cash','Mixed']) if(acBrk[k]>0){l1.push(k);d1.push(acBrk[k]);col1.push(AC_COLORS[k]);}
+      allocChart=new Chart(c1,{type:'doughnut',data:{labels:l1,datasets:[{data:d1,backgroundColor:col1,borderWidth:2,borderColor:'#fff',hoverOffset:5}]},
+        options:{cutout:'68%',plugins:{legend:{display:false},tooltip:{callbacks:{label:i=>`${i.label}: ${fc(i.raw)} (${fp(i.raw/tv*100)})`}}},animation:{duration:450}}});
+    }
+    // Chart 2: Total wealth (investment + real estate)
+    if(hasRealEstate){
+      const c2=document.getElementById('donut-chart-2');
+      if(c2){
+        if(allocChart2){allocChart2.destroy();allocChart2=null;}
+        const l2=[],d2=[],col2=[];
+        for(const k of ['Stocks','Bonds','Cash','Mixed']) if(acBrk[k]>0){l2.push(k);d2.push(acBrk[k]);col2.push(AC_COLORS[k]);}
+        l2.push('Real Estate');d2.push(rentalEquity);col2.push('#0ea5e9');
+        allocChart2=new Chart(c2,{type:'doughnut',data:{labels:l2,datasets:[{data:d2,backgroundColor:col2,borderWidth:2,borderColor:'#fff',hoverOffset:5}]},
+          options:{cutout:'68%',plugins:{legend:{display:false},tooltip:{callbacks:{label:i=>`${i.label}: ${fc(i.raw)} (${fp(i.raw/totalWealth*100)})`}}},animation:{duration:450}}});
+      }
+    }
   },50);
 }
 
@@ -2096,28 +2198,32 @@ function renderIncome(){
   const el=document.getElementById('income-content');
   const st=calcStats();
   if(!st){el.innerHTML=emptyState('💵','No Portfolio Data','Upload statements in Accounts tab first.');return;}
-  const {ti,incBkt,wy,incByAcct,tv}=st;
+  const {ti,tiInv,rentalIncome,incBkt,wy,incByAcct,tv}=st;
+  const hasRental=rentalIncome>0;
 
   el.innerHTML=`
   <div class="grid g4" style="margin-bottom:18px;">
-    <div class="metric" style="border-top:3px solid var(--blue)"><div class="metric-icon">💰</div><div class="metric-label">Projected 12-Month Income</div><div class="metric-value" style="color:var(--blue)">${fc(ti)}</div><div class="metric-sub">Based on current holdings</div></div>
-    <div class="metric" style="border-top:3px solid var(--sky)"><div class="metric-icon">📊</div><div class="metric-label">Weighted Avg Yield</div><div class="metric-value" style="color:var(--sky)">${fp(wy,2)}</div><div class="metric-sub">On ${fc(tv)} total</div></div>
+    <div class="metric" style="border-top:3px solid var(--blue)"><div class="metric-icon">💰</div><div class="metric-label">Total 12-Month Income</div><div class="metric-value" style="color:var(--blue)">${fc(ti)}</div><div class="metric-sub">${hasRental?`Investments ${fc(tiInv)} + Rental ${fc(rentalIncome)}`:'Based on current holdings'}</div></div>
+    <div class="metric" style="border-top:3px solid var(--sky)"><div class="metric-icon">📊</div><div class="metric-label">Portfolio Weighted Yield</div><div class="metric-value" style="color:var(--sky)">${fp(wy,2)}</div><div class="metric-sub">On ${fc(tv)} invested</div></div>
     <div class="metric" style="border-top:3px solid var(--emerald)"><div class="metric-icon">🌿</div><div class="metric-label">Tax-Free Income</div><div class="metric-value" style="color:var(--emerald)">${fc(incBkt['tax-free'])}</div><div class="metric-sub">${ti>0?fp(incBkt['tax-free']/ti*100):'0%'} of total</div></div>
-    <div class="metric" style="border-top:3px solid var(--rose)"><div class="metric-icon">💸</div><div class="metric-label">Taxable Income</div><div class="metric-value" style="color:var(--rose)">${fc(incBkt.taxable)}</div><div class="metric-sub">${ti>0?fp(incBkt.taxable/ti*100):'0%'} of total</div></div>
+    <div class="metric" style="border-top:3px solid var(--rose)"><div class="metric-icon">💸</div><div class="metric-label">Taxable Income</div><div class="metric-value" style="color:var(--rose)">${fc(incBkt.taxable+(hasRental?rentalIncome:0))}</div><div class="metric-sub">${hasRental?'Includes rental net income':ti>0?fp(incBkt.taxable/ti*100)+' of total':''}</div></div>
   </div>
   <div class="grid g2">
-    <div class="card">
-      <div class="card-hdr"><div class="card-title">🧾 Income by Tax Bucket</div></div>
-      <div class="card-body">
-        ${bkt('🌿 Tax-Free (Roth/HSA + Munis)',incBkt['tax-free'],ti,'var(--sky)','Roth IRA, HSA, 529, plus Municipal Bonds in taxable. No federal income tax.')}
-        <hr class="dv">
-        ${bkt('🏛️ Tax-Deferred (IRA/401k)',incBkt['tax-deferred'],ti,'var(--purple)','Traditional IRA & 401(k). Taxed as ordinary income at withdrawal.')}
-        <hr class="dv">
-        ${bkt('💸 Taxable (Brokerage/Bank)',incBkt.taxable,ti,'var(--amber)','Standard brokerage, savings, checking. Qualified dividends at cap-gains rates.')}
+    <div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-hdr"><div class="card-title">🧾 Investment Income by Tax Bucket</div></div>
+        <div class="card-body">
+          ${bkt('🌿 Tax-Free (Roth/HSA + Munis)',incBkt['tax-free'],ti,'var(--sky)','Roth IRA, HSA, 529, plus Municipal Bonds in taxable. No federal income tax.')}
+          <hr class="dv">
+          ${bkt('🏛️ Tax-Deferred (IRA/401k)',incBkt['tax-deferred'],ti,'var(--purple)','Traditional IRA & 401(k). Taxed as ordinary income at withdrawal.')}
+          <hr class="dv">
+          ${bkt('💸 Taxable (Brokerage/Bank)',incBkt.taxable,ti,'var(--amber)','Standard brokerage, savings, checking. Qualified dividends at cap-gains rates.')}
+          ${hasRental?`<hr class="dv">${bkt('🏠 Net Rental Income',rentalIncome,ti,'var(--emerald)','Net operating income from rental properties. Treated as taxable ordinary income.')}`:''}</div>
       </div>
+      ${hasRental?`<div class="alert alert-info">🏠 <strong>Rental Income Included:</strong> ${fc(rentalIncome)}/yr net rental income is counted in your totals and taxable gap calculations. Manage properties in the <strong>Rental Properties</strong> tab.</div>`:'<div class="alert alert-info" style="cursor:pointer" onclick="switchTab(\'realestate\')">🏠 <strong>Have rental properties?</strong> Add them in the <strong>Rental Properties</strong> tab to include that income here.</div>'}
     </div>
     <div class="card">
-      <div class="card-hdr"><div class="card-title">🏆 Top Income Sources</div></div>
+      <div class="card-hdr"><div class="card-title">🏆 Top Investment Income Sources</div></div>
       <div class="card-body">
         <table class="tbl">
           <thead><tr><th>Account</th><th>Type</th><th class="tr">Annual Income</th><th class="tr">Yield</th></tr></thead>
@@ -2125,7 +2231,13 @@ function renderIncome(){
             const tb={taxable:'badge-taxable','tax-deferred':'badge-deferred','tax-free':'badge-free'};
             const tl={taxable:'Taxable','tax-deferred':'Deferred','tax-free':'Tax-Free'};
             return `<tr><td><strong>${a.name}</strong></td><td><span class="badge ${tb[a.taxTreatment]}">${tl[a.taxTreatment]}</span></td><td class="tr"><strong>${fc(a.income)}</strong></td><td class="tr">${fp(a.value>0?a.income/a.value*100:0,2)}</td></tr>`;
-          }).join('')}</tbody>
+          }).join('')}
+          ${hasRental?(S.rentalProperties||[]).map(p=>{
+            const gross=(p.annualRent||0)*(1-(p.vacancyRate||0)/100);
+            const exp=Object.values(p.expenses||{}).reduce((a,b)=>a+(parseFloat(b)||0),0);
+            const noi=Math.max(0,gross-exp);
+            return `<tr style="background:rgba(16,185,129,.04)"><td><strong>🏠 ${p.name}</strong></td><td><span class="badge badge-taxable">Taxable</span></td><td class="tr"><strong>${fc(noi)}</strong></td><td class="tr" style="color:var(--text3)">Rental NOI</td></tr>`;
+          }).join(''):''}</tbody>
         </table>
       </div>
     </div>
@@ -2307,7 +2419,7 @@ function renderPlanner(){
       <div class="card" style="margin-bottom:14px">
         <div class="card-hdr"><div class="card-title">🎯 Income Targets</div></div>
         <div class="card-body">
-          <div class="alert alert-info" style="margin-bottom:12px">Current: Tax-Free ${fc(ib['tax-free'])} · Deferred ${fc(ib['tax-deferred'])} · Taxable ${fc(ib.taxable)}</div>
+          <div class="alert alert-info" style="margin-bottom:12px">Current: Tax-Free ${fc(ib['tax-free'])} · Deferred ${fc(ib['tax-deferred'])} · Taxable ${fc(ib.taxable)}${st.rentalIncome>0?` <span style="font-weight:700;color:var(--emerald-d)">+ ${fc(st.rentalIncome)} rental</span>`:' <span style="font-size:11px;color:var(--text3)">(add rental in 🏠 tab)</span>'}</div>
           ${[['free','Tax-Free (Roth/HSA + Munis)'],['deferred','Tax-Deferred (IRA/401k)'],['taxable','Taxable (Brokerage)']].map(([k,lbl])=>`<div class="form-group">
             <label class="form-label">Target ${lbl} ($/yr)</label>
             <input class="input" id="pl-${k}" type="number" min="0" placeholder="e.g. 5000" value="${pr?pr.inputs[k]:''}">
@@ -2402,7 +2514,13 @@ function computePlan(tF,tD,tT,strats,exTF,taxProf){
   const tey=(y)=>+(y/(1-combined)).toFixed(2);
   const teyFed=(y)=>+(y/(1-fedRate)).toFixed(2);
   const qdiRate=fedRate>=0.37?0.20:fedRate>=0.22?0.15:0;
-  const dF=Math.max(0,tF-ib['tax-free']), dD=Math.max(0,tD-ib['tax-deferred']), dT=Math.max(0,tT-ib.taxable);
+  // Include rental net income in taxable bucket when computing gaps
+  const rentalIncomePlan = (S.rentalProperties||[]).reduce((s,p)=>{
+    const gross=(p.annualRent||0)*(1-(p.vacancyRate||0)/100);
+    const exp=Object.values(p.expenses||{}).reduce((a,b)=>a+(parseFloat(b)||0),0);
+    return s+Math.max(0,gross-exp);
+  },0);
+  const dF=Math.max(0,tF-ib['tax-free']), dD=Math.max(0,tD-ib['tax-deferred']), dT=Math.max(0,tT-(ib.taxable+rentalIncomePlan));
 
   // ── STRATEGY OBJECTS ──────────────────────────────────────────────
   const strategies={taxable:[],taxDeferred:[],taxFree:[]};
@@ -3120,6 +3238,202 @@ function renderPlanResults(r){
       ${strats.taxFree.map(stratCard).join('')}
     </div>
   </div>`:''}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// RENDER: REAL ESTATE / RENTAL PROPERTIES
+// ─────────────────────────────────────────────────────────────────────
+function calcRentalNOI(p){
+  const gross=(p.annualRent||0)*(1-(p.vacancyRate||0)/100);
+  const exp=Object.values(p.expenses||{}).reduce((a,b)=>a+(parseFloat(b)||0),0);
+  return {gross,exp,noi:gross-exp};
+}
+
+function renderRealEstate(){
+  const el=document.getElementById('realestate-content');
+  const props=S.rentalProperties||[];
+  const totalGross=props.reduce((s,p)=>s+calcRentalNOI(p).gross,0);
+  const totalExp=props.reduce((s,p)=>s+calcRentalNOI(p).exp,0);
+  const totalNOI=props.reduce((s,p)=>s+calcRentalNOI(p).noi,0);
+
+  el.innerHTML=`
+  <div class="grid g12">
+    <!-- ADD PROPERTY FORM -->
+    <div>
+      <div class="card">
+        <div class="card-hdr"><div class="card-title">➕ Add Rental Property</div></div>
+        <div class="card-body">
+          <div class="form-group">
+            <label class="form-label">Property Name / Nickname</label>
+            <input class="input" id="rp-name" placeholder="e.g. 123 Maple St, Downtown Condo">
+          </div>
+          <div class="grid g2">
+            <div class="form-group">
+              <label class="form-label">Monthly Gross Rent ($)</label>
+              <input class="input" id="rp-rent" type="number" min="0" placeholder="e.g. 2500" oninput="rpPreview()">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Vacancy Allowance (%)</label>
+              <div class="inp-sfx"><input class="input" id="rp-vacancy" type="number" min="0" max="100" value="5" oninput="rpPreview()"><span class="inp-sfx-lbl">%</span></div>
+            </div>
+          </div>
+          <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);margin:8px 0 10px">Property Equity</div>
+          <div class="grid g2">
+            <div class="form-group">
+              <label class="form-label">Current Market Value ($)</label>
+              <input class="input" id="rp-propvalue" type="number" min="0" placeholder="e.g. 500000" oninput="rpPreview()">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Outstanding Mortgage Balance ($)</label>
+              <input class="input" id="rp-mortgagebal" type="number" min="0" placeholder="e.g. 300000" oninput="rpPreview()">
+            </div>
+          </div>
+          <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);margin:8px 0 10px">Annual Expenses</div>
+          <div class="grid g2">
+            ${[
+              ['rp-mortgage','Mortgage / P&I'],
+              ['rp-tax','Property Tax'],
+              ['rp-insurance','Insurance'],
+              ['rp-maintenance','Maintenance'],
+              ['rp-mgmt','Management Fees'],
+              ['rp-hoa','HOA / Condo Fees'],
+              ['rp-utilities','Utilities (if paid)'],
+              ['rp-other','Other Expenses']
+            ].map(([id,lbl])=>`<div class="form-group">
+              <label class="form-label">${lbl} ($/yr)</label>
+              <input class="input" id="${id}" type="number" min="0" placeholder="0" oninput="rpPreview()">
+            </div>`).join('')}
+          </div>
+          <div id="rp-preview" style="background:var(--surface2);border-radius:var(--r-sm);padding:11px 14px;font-size:13px;margin-bottom:14px;display:none">
+            <div style="display:flex;justify-content:space-between"><span>Effective Gross Rent</span><strong id="rpp-gross">—</strong></div>
+            <div style="display:flex;justify-content:space-between;margin-top:4px"><span>Total Expenses</span><strong id="rpp-exp" style="color:var(--rose)">—</strong></div>
+            <hr class="dv" style="margin:8px 0">
+            <div style="display:flex;justify-content:space-between"><span style="font-weight:700">Net Operating Income</span><strong id="rpp-noi" style="font-size:15px">—</strong></div>
+            <div id="rpp-equity-row" style="display:flex;justify-content:space-between;margin-top:6px;padding-top:6px;border-top:1px dashed var(--border)"><span>Property Equity (Value − Mortgage)</span><strong id="rpp-equity" style="color:var(--blue)">—</strong></div>
+          </div>
+          <button class="btn btn-emerald" style="width:100%" onclick="addRentalProperty()">✅ Add Property</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- PROPERTIES LIST + SUMMARY -->
+    <div>
+      ${props.length>0?`
+      <div class="rental-summary-bar">
+        <div class="rental-sum-item"><div class="rental-sum-val" style="color:var(--blue)">${fc(totalGross)}</div><div class="rental-sum-lbl">Gross Rent / Year</div></div>
+        <div style="width:1px;height:40px;background:rgba(0,0,0,.1)"></div>
+        <div class="rental-sum-item"><div class="rental-sum-val" style="color:var(--rose)">${fc(totalExp)}</div><div class="rental-sum-lbl">Total Expenses / Year</div></div>
+        <div style="width:1px;height:40px;background:rgba(0,0,0,.1)"></div>
+        <div class="rental-sum-item"><div class="rental-sum-val ${totalNOI>=0?'rental-noi-pos':'rental-noi-neg'}">${fc(totalNOI)}</div><div class="rental-sum-lbl">Net Income / Year</div></div>
+        <div style="width:1px;height:40px;background:rgba(0,0,0,.1)"></div>
+        ${(()=>{const eq=props.reduce((s,p)=>s+Math.max(0,(p.propertyValue||0)-(p.mortgageBalance||0)),0);return eq>0?`<div class="rental-sum-item"><div class="rental-sum-val" style="color:var(--sky)">${fc(eq)}</div><div class="rental-sum-lbl">Total Equity</div></div><div style="width:1px;height:40px;background:rgba(0,0,0,.1)"></div>`:'';})()}
+        <div class="rental-sum-item"><div class="rental-sum-val" style="color:var(--purple)">${props.length}</div><div class="rental-sum-lbl">Properties</div></div>
+      </div>
+      <div class="alert alert-success" style="margin-bottom:14px">✅ <strong>${fc(Math.max(0,totalNOI))} net rental income</strong> is included in your Income dashboard and reduces the taxable gap in Income Planning.</div>
+      `:''}
+      ${props.length===0?`
+      <div class="empty" style="padding:48px 24px">
+        <div class="empty-icon">🏠</div>
+        <div class="empty-title">No Properties Added Yet</div>
+        <div class="empty-sub">Fill in the form and click Add Property. Your rental income will flow into the Income dashboard and Target Income Planner automatically.</div>
+      </div>
+      `:''}
+      ${props.map((p,i)=>{
+        const {gross,exp,noi}=calcRentalNOI(p);
+        const grossMo=p.annualRent||0;
+        const expLabels={mortgage:'Mortgage',propertyTax:'Prop Tax',insurance:'Insurance',maintenance:'Maintenance',management:'Management',hoa:'HOA',utilities:'Utilities',other:'Other'};
+        const expItems=Object.entries(p.expenses||{}).filter(([,v])=>parseFloat(v)>0);
+        const equity=(p.propertyValue||0)-(p.mortgageBalance||0);
+        const hasEquity=(p.propertyValue||0)>0;
+        return `<div class="rental-prop-card">
+          <div class="rental-prop-hdr">
+            <div class="rental-prop-name">🏠 <span>${p.name}</span>
+              <span style="font-size:11px;font-weight:400;color:var(--text3)">${fc(grossMo/12)}/mo gross</span>
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick="deleteRentalProperty('${p.id}')">🗑️ Remove</button>
+          </div>
+          <div class="rental-prop-body" style="grid-template-columns:repeat(${hasEquity?4:3},1fr)">
+            <div class="rental-prop-col">
+              <div class="rental-prop-lbl">Gross Rent (after vacancy)</div>
+              <div class="rental-prop-val" style="color:var(--blue)">${fc(gross)}<span style="font-size:12px;font-weight:500;color:var(--text3)">/yr</span></div>
+              <div style="font-size:11px;color:var(--text3);margin-top:3px">${p.vacancyRate||0}% vacancy allowance</div>
+            </div>
+            <div class="rental-prop-col">
+              <div class="rental-prop-lbl">Annual Expenses</div>
+              <div class="rental-prop-val" style="color:var(--rose)">${fc(exp)}<span style="font-size:12px;font-weight:500;color:var(--text3)">/yr</span></div>
+              <div style="font-size:11px;color:var(--text3);margin-top:3px">${expItems.length} expense categories</div>
+            </div>
+            <div class="rental-prop-col">
+              <div class="rental-prop-lbl">Net Operating Income</div>
+              <div class="rental-prop-val ${noi>=0?'rental-noi-pos':'rental-noi-neg'}">${fc(noi)}<span style="font-size:12px;font-weight:500;color:var(--text3)">/yr</span></div>
+              <div style="font-size:11px;color:var(--text3);margin-top:3px">${fc(noi/12)}/mo net</div>
+            </div>
+            ${hasEquity?`<div class="rental-prop-col">
+              <div class="rental-prop-lbl">Property Equity</div>
+              <div class="rental-prop-val" style="color:${equity>=0?'var(--sky)':'var(--rose)'}">${fc(equity)}</div>
+              <div style="font-size:11px;color:var(--text3);margin-top:3px">${fc(p.propertyValue||0)} − ${fc(p.mortgageBalance||0)}</div>
+            </div>`:''}
+          </div>
+          ${expItems.length>0?`<div style="padding:10px 16px;border-top:1px solid var(--border);display:flex;flex-wrap:wrap;gap:8px">
+            ${expItems.map(([k,v])=>`<span style="font-size:11px;background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:2px 8px"><strong>${expLabels[k]||k}:</strong> ${fc(parseFloat(v))}</span>`).join('')}
+          </div>`:''}
+        </div>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
+
+function rpPreview(){
+  const rent=(parseFloat(document.getElementById('rp-rent').value)||0)*12;
+  const vac=(parseFloat(document.getElementById('rp-vacancy').value)||0);
+  if(!rent){document.getElementById('rp-preview').style.display='none';return;}
+  const gross=rent*(1-vac/100);
+  const expIds=['rp-mortgage','rp-tax','rp-insurance','rp-maintenance','rp-mgmt','rp-hoa','rp-utilities','rp-other'];
+  const exp=expIds.reduce((s,id)=>s+(parseFloat(document.getElementById(id).value)||0),0);
+  const noi=gross-exp;
+  const propVal=parseFloat(document.getElementById('rp-propvalue').value)||0;
+  const mortBal=parseFloat(document.getElementById('rp-mortgagebal').value)||0;
+  const equity=propVal-mortBal;
+  document.getElementById('rpp-gross').textContent=fc(gross);
+  document.getElementById('rpp-exp').textContent=fc(exp);
+  document.getElementById('rpp-noi').textContent=fc(noi);
+  document.getElementById('rpp-noi').style.color=noi>=0?'var(--emerald)':'var(--rose)';
+  const eqRow=document.getElementById('rpp-equity-row');
+  const eqVal=document.getElementById('rpp-equity');
+  if(propVal>0){eqRow.style.display='flex';eqVal.textContent=fc(equity);eqVal.style.color=equity>=0?'var(--blue)':'var(--rose)';}
+  else{eqRow.style.display='none';}
+  document.getElementById('rp-preview').style.display='block';
+}
+
+function addRentalProperty(){
+  const name=document.getElementById('rp-name').value.trim();
+  const rent=parseFloat(document.getElementById('rp-rent').value)||0;
+  if(!name){toast('Enter a property name','err');return;}
+  if(!rent){toast('Enter monthly gross rent','err');return;}
+  const expMap={mortgage:'rp-mortgage',propertyTax:'rp-tax',insurance:'rp-insurance',maintenance:'rp-maintenance',management:'rp-mgmt',hoa:'rp-hoa',utilities:'rp-utilities',other:'rp-other'};
+  const expenses={};
+  for(const[k,id] of Object.entries(expMap)) expenses[k]=parseFloat(document.getElementById(id).value)||0;
+  const propertyValue=parseFloat(document.getElementById('rp-propvalue').value)||0;
+  const mortgageBalance=parseFloat(document.getElementById('rp-mortgagebal').value)||0;
+  const prop={id:'rp_'+Date.now(),name,annualRent:rent*12,vacancyRate:parseFloat(document.getElementById('rp-vacancy').value)||0,propertyValue,mortgageBalance,expenses};
+  S.rentalProperties=[...(S.rentalProperties||[]),prop];
+  saveSession();
+  // Reset form
+  ['rp-name','rp-rent','rp-propvalue','rp-mortgagebal'].forEach(id=>document.getElementById(id).value='');
+  document.getElementById('rp-vacancy').value='5';
+  ['rp-mortgage','rp-tax','rp-insurance','rp-maintenance','rp-mgmt','rp-hoa','rp-utilities','rp-other'].forEach(id=>document.getElementById(id).value='');
+  document.getElementById('rp-preview').style.display='none';
+  renderRealEstate();
+  toast(`🏠 ${name} added — ${fc(Math.max(0,calcRentalNOI(prop).noi))} NOI/yr`);
+}
+
+function deleteRentalProperty(id){
+  const p=S.rentalProperties.find(x=>x.id===id);
+  if(!confirm(`Remove "${p?.name||'this property'}"?`)) return;
+  S.rentalProperties=S.rentalProperties.filter(x=>x.id!==id);
+  saveSession();
+  renderRealEstate();
+  toast('Property removed');
 }
 
 // ─────────────────────────────────────────────────────────────────────

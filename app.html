@@ -1,4 +1,34 @@
 <!--
+  PortfolioPro v1.2  (2026-05-17 14:45 UTC)
+  ────────────────────────────────────────────────────────
+  WHAT'S NEW IN v1.2
+  ──────────────────
+  Sample Data & Demo Mode:
+  • Auto-loads sample portfolio on first visit (no saved session)
+  • $1.9M sample across 9 accounts + 3 rental properties
+  • 4 intentional asset-location diagnostics in sample data
+  • Yellow banner: "Demo Mode — This is not your real data"
+  • Sample data auto-clears the moment real data is added
+  • "Load Sample Portfolio" button preserved on empty state
+
+  Rental Properties:
+  • New Rental Properties tab with full NOI calculator
+  • Rental equity (value minus mortgage) included in total wealth
+  • Net rental income flows into Income & Tax Dashboard
+  • Three sample properties: duplex, SFH, condo
+
+  Legal Disclaimers:
+  • Persistent footer bar on all tabs
+  • Per-tab inline notices on Income, Optimizer, Planner, Rental tabs
+  • Expanded footer disclaimer on index.html landing page
+  • Hero CTA sub-note: "For educational use only"
+
+  Landing Page (index.html):
+  • Rental property mentions added throughout
+  • Step 3 renamed "Classify Accounts & Add Rentals"
+  • Footer Features column updated
+
+  ────────────────────────────────────────────────────────
   Portfolio Pro v0.3 — ALLOCATION COMPLETE  (2026-05-12)
   ────────────────────────────────────────────────────────
   Milestone: Deep allocation analysis & look-through implemented
@@ -331,6 +361,21 @@ hr.dv{border:none;border-top:1px solid var(--border);margin:13px 0;}
   </div>
 </nav>
 
+<!-- SAMPLE DATA BANNER -->
+<div id="sample-banner" style="display:none;background:#fef3c7;border-bottom:2px solid #f59e0b;padding:11px 20px;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+  <div style="display:flex;align-items:center;gap:10px;">
+    <span style="font-size:20px">📊</span>
+    <div>
+      <strong style="color:#78350f;font-size:14px">⚠️ Demo Mode — This is not your real data</strong>
+      <span style="color:#92400e;font-size:13px;margin-left:10px">You're viewing a sample $1.9M portfolio (9 accounts, 3 rentals) so you can explore every feature. Upload your own statements to get started.</span>
+    </div>
+  </div>
+  <div style="display:flex;gap:8px;flex-shrink:0;">
+    <button class="btn btn-sm" onclick="clearSampleAndReset()" style="background:#92400e;color:#fff;border:none">📂 Upload My Data</button>
+    <button class="btn btn-ghost btn-sm" onclick="clearSampleAndReset()" style="color:#92400e;border-color:#fcd34d;font-size:12px">✕ Dismiss</button>
+  </div>
+</div>
+
 <!-- LOCK SCREEN -->
 <div class="lockscreen" id="lockscreen" style="display:none">
   <div class="lockscreen-card">
@@ -451,7 +496,12 @@ hr.dv{border:none;border-top:1px solid var(--border);margin:13px 0;}
       <div class="empty">
         <div class="empty-icon">🗂️</div>
         <div class="empty-title">No accounts yet</div>
-        <div class="empty-sub">Upload files or scan a folder above</div>
+        <div class="empty-sub">Upload your brokerage files above — or try the sample portfolio to explore all features first.</div>
+        <div style="margin-top:22px;padding:20px 24px;background:#fef3c7;border:1px solid #fcd34d;border-radius:var(--r);display:inline-block;text-align:center;">
+          <div style="font-size:13px;font-weight:600;color:#78350f;margin-bottom:10px">👇 See what PortfolioPro can do with a realistic example</div>
+          <button class="btn" onclick="loadSampleData()" style="background:#f59e0b;color:#fff;font-size:14px;padding:10px 24px;border:none">📊 Load Sample Portfolio ($1.9M · 9 accounts · 3 rentals)</button>
+          <div style="font-size:11px;color:#92400e;margin-top:8px">Sample data is cleared the moment you upload your own files</div>
+        </div>
       </div>
     </div>
   </div>
@@ -465,24 +515,36 @@ hr.dv{border:none;border-top:1px solid var(--border);margin:13px 0;}
   <!-- TAB 3 -->
   <div class="tab-panel" id="panel-income">
     <div class="sec-hdr"><div class="sec-title">Income &amp; Tax Dashboard</div><div class="sec-sub">Projected annual income segmented by IRS tax treatment</div></div>
+    <div style="background:#fefce8;border:1px solid #fde68a;border-radius:6px;padding:8px 14px;margin:0 0 12px;font-size:11px;color:#854d0e;">
+      📌 <strong>Informational only.</strong> Yield figures are estimates based on stated or historical rates. Tax bucket projections use simplified marginal rates and do not account for your complete tax situation. Consult a CPA or financial advisor before making income or withdrawal decisions.
+    </div>
     <div id="income-content"></div>
   </div>
 
   <!-- TAB 4 -->
   <div class="tab-panel" id="panel-optimizer">
     <div class="sec-hdr"><div class="sec-title">Target Allocation Optimizer</div><div class="sec-sub">Generate a tax-efficient trade plan to reach your target allocation</div></div>
+    <div style="background:#fefce8;border:1px solid #fde68a;border-radius:6px;padding:8px 14px;margin:0 0 12px;font-size:11px;color:#854d0e;">
+      📌 <strong>Trade suggestions are illustrative only — not a recommendation to buy or sell any security.</strong> Share quantities are not shown; calculate at current market prices before executing. SELL actions in taxable accounts may trigger capital gains tax. DEPOSIT actions are subject to IRS annual contribution limits. Consult a licensed financial advisor or tax professional before executing any transactions.
+    </div>
     <div id="optimizer-content"></div>
   </div>
 
   <!-- TAB 5 -->
   <div class="tab-panel" id="panel-planner">
     <div class="sec-hdr"><div class="sec-title">Target Income Planner</div><div class="sec-sub">Calculate the exact moves needed to reach your income goals per tax bucket</div></div>
+    <div style="background:#fefce8;border:1px solid #fde68a;border-radius:6px;padding:8px 14px;margin:0 0 12px;font-size:11px;color:#854d0e;">
+      📌 <strong>Informational only — not financial, tax, or investment advice.</strong> Income strategies and tax-equivalent yield calculations use simplified federal and state marginal rates. Actual tax liability depends on your complete financial picture including deductions, AMT, IRMAA, Social Security taxation, and other factors. Consult a CPA, CFP, or tax advisor before restructuring income or making portfolio changes.
+    </div>
     <div id="planner-content"></div>
   </div>
 
   <!-- TAB 6 -->
   <div class="tab-panel" id="panel-realestate">
     <div class="sec-hdr"><div class="sec-title">Rental Properties</div><div class="sec-sub">Manually enter rental income and expenses — net income flows into your total income picture</div></div>
+    <div style="background:#fefce8;border:1px solid #fde68a;border-radius:6px;padding:8px 14px;margin:0 0 12px;font-size:11px;color:#854d0e;">
+      📌 <strong>Estimates only.</strong> NOI calculations do not include depreciation, mortgage interest deduction, passive activity loss rules, or other tax adjustments that may apply to your rental income. Actual taxable rental income will differ. Consult a CPA familiar with real estate taxation for accurate reporting and planning.
+    </div>
     <div id="realestate-content"></div>
   </div>
 
@@ -804,8 +866,173 @@ const BUY_SIGS = {
 // ─────────────────────────────────────────────────────────────────────
 // STATE
 // ─────────────────────────────────────────────────────────────────────
-const S = { accounts:[], rentalProperties:[], activeTab:'ingestion', optimizerResult:null, plannerResult:null, sessionPin:null };
+const S = { accounts:[], rentalProperties:[], activeTab:'ingestion', optimizerResult:null, plannerResult:null, sessionPin:null, isSampleData:false };
 let allocChart = null, allocChart2 = null;
+
+// ─────────────────────────────────────────────────────────────────────
+// SAMPLE / DEMO DATA — $1.94M across 9 accounts · 3 rentals · $2.49M total wealth
+// Deliberately includes 4 asset-location issues so the Income Planner
+// lights up with actionable diagnostics. Sub-classes cover 20+ categories
+// so every chart and bar fills up impressively.
+// ─────────────────────────────────────────────────────────────────────
+const SAMPLE_DATA = {
+  accounts:[
+    // ── 1. Fidelity Roth IRA (tax-free, $285K) ──────────────────────
+    // JEPI here is optimal — high income, 100% tax-free in Roth
+    // VNQ (REIT) also optimal in Roth — dividends avoid ordinary-income tax
+    {
+      id:'samp_1',name:'Fidelity Roth IRA',taxTreatment:'tax-free',totalBalance:285000,source:'sample',
+      positions:[
+        {id:'sp1', symbol:'VOO',  description:'Vanguard S&P 500 ETF',                       assetClass:'Stocks',subClass:'Large Cap US',       value:75000, yield:1.3, estimatedYield:1.3, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp2', symbol:'VTI',  description:'Vanguard Total Stock Market ETF',              assetClass:'Stocks',subClass:'Total Market US',    value:50000, yield:1.4, estimatedYield:1.4, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp3', symbol:'JEPI', description:'JPMorgan Equity Premium Income ETF',           assetClass:'Mixed', subClass:'Covered Call',        value:85000, yield:7.5, estimatedYield:7.5, isMuni:false,isEst:true, detectedRate:null,lt:{Stocks:0.85,Cash:0.15}},
+        {id:'sp4', symbol:'VNQ',  description:'Vanguard Real Estate ETF',                     assetClass:'Stocks',subClass:'REIT',               value:45000, yield:4.0, estimatedYield:4.0, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp5', symbol:'SPAXX',description:'Fidelity Government Money Market Fund',        assetClass:'Cash',  subClass:'Money Market',        value:30000, yield:5.0, estimatedYield:5.0, isMuni:false,isEst:true, detectedRate:null,lt:null},
+      ]
+    },
+    // ── 2. Schwab Traditional IRA (tax-deferred, $395K) ──────────────
+    // ⚠️ MUB here → triggers "Muni Bond in IRA" asset-location warning
+    // Muni tax exemption is wasted when sheltered inside a tax-deferred account
+    {
+      id:'samp_2',name:'Schwab Traditional IRA',taxTreatment:'tax-deferred',totalBalance:395000,source:'sample',
+      positions:[
+        {id:'sp6', symbol:'FXAIX',description:'Fidelity 500 Index Fund',                     assetClass:'Stocks',subClass:'Large Cap US',       value:110000,yield:1.3, estimatedYield:1.3, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp7', symbol:'BND',  description:'Vanguard Total Bond Market ETF',               assetClass:'Bonds', subClass:'Total Bond Market',   value:75000, yield:4.5, estimatedYield:4.5, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp8', symbol:'JAAA', description:'Janus Henderson AAA CLO ETF',                  assetClass:'Bonds', subClass:'CLO AAA',             value:65000, yield:6.2, estimatedYield:6.2, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp9', symbol:'VCIT', description:'Vanguard Intermediate-Term Corp Bond ETF',     assetClass:'Bonds', subClass:'Intermediate Corp',   value:75000, yield:5.1, estimatedYield:5.1, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp10',symbol:'MUB',  description:'iShares National Muni Bond ETF',               assetClass:'Bonds', subClass:'Muni Bonds',          value:40000, yield:3.2, estimatedYield:3.2, isMuni:true, isEst:true, detectedRate:null,lt:null},
+        {id:'sp11',symbol:'SWVXX',description:'Schwab Value Advantage Money Market',          assetClass:'Cash',  subClass:'Money Market',        value:30000, yield:5.1, estimatedYield:5.1, isMuni:false,isEst:true, detectedRate:null,lt:null},
+      ]
+    },
+    // ── 3. Vanguard Taxable Brokerage (taxable, $345K) ──────────────
+    // ⚠️ JEPQ here → triggers "Covered-Call ETF in Taxable" warning
+    // VTEB (muni) is correctly placed in taxable — double-exempt income
+    {
+      id:'samp_3',name:'Vanguard Taxable Brokerage',taxTreatment:'taxable',totalBalance:345000,source:'sample',
+      positions:[
+        {id:'sp12',symbol:'VTI',  description:'Vanguard Total Stock Market ETF',              assetClass:'Stocks',subClass:'Total Market US',    value:80000, yield:1.4, estimatedYield:1.4, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp13',symbol:'VXUS', description:'Vanguard Total International Stock ETF',       assetClass:'Stocks',subClass:'International',       value:45000, yield:3.2, estimatedYield:3.2, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp14',symbol:'VTEB', description:'Vanguard Tax-Exempt Bond ETF',                 assetClass:'Bonds', subClass:'Muni Bonds',          value:70000, yield:3.3, estimatedYield:3.3, isMuni:true, isEst:true, detectedRate:null,lt:null},
+        {id:'sp15',symbol:'QQQ',  description:'Invesco QQQ Trust (Nasdaq-100 ETF)',           assetClass:'Stocks',subClass:'Large Cap Growth',    value:55000, yield:0.6, estimatedYield:0.6, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp16',symbol:'SGOV', description:'iShares 0-3 Month Treasury Bond ETF',          assetClass:'Cash',  subClass:'Short Treasury',      value:45000, yield:5.2, estimatedYield:5.2, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp17',symbol:'JEPQ', description:'JPMorgan Nasdaq Equity Premium Income ETF',    assetClass:'Mixed', subClass:'Covered Call',        value:35000, yield:9.0, estimatedYield:9.0, isMuni:false,isEst:true, detectedRate:null,lt:{Stocks:0.85,Cash:0.15}},
+        {id:'sp18',symbol:'VYM',  description:'Vanguard High Dividend Yield ETF',             assetClass:'Stocks',subClass:'High Dividend',       value:15000, yield:3.0, estimatedYield:3.0, isMuni:false,isEst:true, detectedRate:null,lt:null},
+      ]
+    },
+    // ── 4. Fidelity 401(k) (tax-deferred, $345K) ────────────────────
+    // AOM has look-through → split into 40% Stocks / 60% Bonds for accurate allocation
+    {
+      id:'samp_4',name:'Fidelity 401(k)',taxTreatment:'tax-deferred',totalBalance:345000,source:'sample',
+      positions:[
+        {id:'sp19',symbol:'FXAIX',description:'Fidelity 500 Index Fund',                     assetClass:'Stocks',subClass:'Large Cap US',       value:175000,yield:1.3, estimatedYield:1.3, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp20',symbol:'FSKAX',description:'Fidelity Total Market Index Fund',             assetClass:'Stocks',subClass:'Total Market US',    value:75000, yield:1.4, estimatedYield:1.4, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp21',symbol:'AOM',  description:'iShares Core Moderate Allocation ETF',         assetClass:'Mixed', subClass:'Moderate Allocation', value:55000, yield:2.8, estimatedYield:2.8, isMuni:false,isEst:true, detectedRate:null,lt:{Stocks:0.40,Bonds:0.60}},
+        {id:'sp22',symbol:'VBTLX',description:'Vanguard Total Bond Market Index Fund',        assetClass:'Bonds', subClass:'Total Bond Market',   value:40000, yield:4.5, estimatedYield:4.5, isMuni:false,isEst:true, detectedRate:null,lt:null},
+      ]
+    },
+    // ── 5. Merrill Lynch Taxable (taxable, $212K) ────────────────────
+    // ⚠️ HYG → "High-Yield Bond in Taxable" warning (ordinary income, should be in IRA)
+    // ⚠️ VNQ → "REIT in Taxable" warning (non-qualified dividends, should be in Roth)
+    {
+      id:'samp_5',name:'Merrill Lynch Brokerage',taxTreatment:'taxable',totalBalance:212000,source:'sample',
+      positions:[
+        {id:'sp23',symbol:'SCHD', description:'Schwab US Dividend Equity ETF',                assetClass:'Stocks',subClass:'Dividend',            value:58000, yield:3.5, estimatedYield:3.5, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp24',symbol:'HYG',  description:'iShares iBoxx High Yield Corp Bond ETF',       assetClass:'Bonds', subClass:'High Yield',          value:52000, yield:6.8, estimatedYield:6.8, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp25',symbol:'VNQ',  description:'Vanguard Real Estate ETF',                     assetClass:'Stocks',subClass:'REIT',               value:42000, yield:4.0, estimatedYield:4.0, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp26',symbol:'DISC CD',description:'Certificate of Deposit 5.10% 2025',          assetClass:'Cash',  subClass:'Certificate of Deposit',value:38000,yield:5.1, estimatedYield:5.1, isMuni:false,isEst:false,detectedRate:5.1, lt:null},
+        {id:'sp27',symbol:'USFR', description:'WisdomTree Floating Rate Treasury ETF',        assetClass:'Cash',  subClass:'Float Rate Treasury', value:22000, yield:5.4, estimatedYield:5.4, isMuni:false,isEst:true, detectedRate:null,lt:null},
+      ]
+    },
+    // ── 6. Chase Brokerage (taxable, $118K) — individual bonds ───────
+    // Shows CUSIP/individual bond parsing: Treasury note, CA Muni, stock
+    {
+      id:'samp_6',name:'Chase Brokerage',taxTreatment:'taxable',totalBalance:118000,source:'sample',
+      positions:[
+        {id:'sp28',symbol:'US TREAS', description:'US Treasury Note 4.50% due 2027',          assetClass:'Bonds', subClass:'Intermediate Treasury',value:45000,yield:4.5, estimatedYield:4.5, isMuni:false,isEst:false,detectedRate:4.5, lt:null},
+        {id:'sp29',symbol:'CA MUNI',  description:'California GO Bond 3.25% 2030',             assetClass:'Bonds', subClass:'Muni Bonds',          value:35000,yield:3.25,estimatedYield:3.25,isMuni:true, isEst:false,detectedRate:3.25,lt:null},
+        {id:'sp30',symbol:'JPM',      description:'JPMorgan Chase & Co',                       assetClass:'Stocks',subClass:'US Financials',       value:22000,yield:2.2, estimatedYield:2.2, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp31',symbol:'IWM',      description:'iShares Russell 2000 ETF (Small Cap)',      assetClass:'Stocks',subClass:'Small Cap US',        value:16000,yield:1.2, estimatedYield:1.2, isMuni:false,isEst:true, detectedRate:null,lt:null},
+      ]
+    },
+    // ── 7. E*TRADE Roth IRA (tax-free, $95K) ─────────────────────────
+    // JEPQ correctly in Roth — 9% yield, 100% tax-free
+    {
+      id:'samp_7',name:'E*TRADE Roth IRA',taxTreatment:'tax-free',totalBalance:95000,source:'sample',
+      positions:[
+        {id:'sp32',symbol:'VUG',  description:'Vanguard Growth ETF',                          assetClass:'Stocks',subClass:'Large Cap Growth',   value:40000, yield:0.5, estimatedYield:0.5, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp33',symbol:'JEPQ', description:'JPMorgan Nasdaq Equity Premium Income ETF',    assetClass:'Mixed', subClass:'Covered Call',        value:35000, yield:9.0, estimatedYield:9.0, isMuni:false,isEst:true, detectedRate:null,lt:{Stocks:0.85,Cash:0.15}},
+        {id:'sp34',symbol:'SGOV', description:'iShares 0-3 Month Treasury Bond ETF',          assetClass:'Cash',  subClass:'Short Treasury',      value:20000, yield:5.2, estimatedYield:5.2, isMuni:false,isEst:true, detectedRate:null,lt:null},
+      ]
+    },
+    // ── 8. Ally High-Yield Savings (taxable, $88K) ───────────────────
+    // Shows savings account / bank statement support with detected APY
+    {
+      id:'samp_8',name:'Ally High-Yield Savings',taxTreatment:'taxable',totalBalance:88000,source:'sample',
+      positions:[
+        {id:'sp35',symbol:'SAVINGS',description:'High-Yield Savings Account',                 assetClass:'Cash',  subClass:'Savings Account',    value:88000, yield:4.75,estimatedYield:4.75,isMuni:false,isEst:false,detectedRate:4.75,lt:null},
+      ]
+    },
+    // ── 9. Fidelity HSA (tax-free, $52K) ─────────────────────────────
+    // HSA contributions + growth 100% tax-free for medical
+    {
+      id:'samp_9',name:'Fidelity HSA',taxTreatment:'tax-free',totalBalance:52000,source:'sample',
+      positions:[
+        {id:'sp36',symbol:'FXAIX',description:'Fidelity 500 Index Fund',                     assetClass:'Stocks',subClass:'Large Cap US',       value:30000, yield:1.3, estimatedYield:1.3, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp37',symbol:'BND',  description:'Vanguard Total Bond Market ETF',               assetClass:'Bonds', subClass:'Total Bond Market',  value:15000, yield:4.5, estimatedYield:4.5, isMuni:false,isEst:true, detectedRate:null,lt:null},
+        {id:'sp38',symbol:'VMFXX',description:'Vanguard Federal Money Market Fund',           assetClass:'Cash',  subClass:'Money Market',        value:7000,  yield:5.1, estimatedYield:5.1, isMuni:false,isEst:true, detectedRate:null,lt:null},
+      ]
+    },
+  ],
+  rentalProperties:[
+    {
+      id:'srp_1',name:'Maple Street Duplex',
+      annualRent:33600,vacancyRate:5,propertyValue:485000,mortgageBalance:218000,
+      expenses:{mortgage:12000,propertyTax:3800,insurance:1800,maintenance:2400,management:2016,hoa:0,utilities:0,other:600}
+      // Gross: $31,920 · Expenses: $22,616 · NOI: $9,304 · Equity: $267,000
+    },
+    {
+      id:'srp_2',name:'Oak Ave Single Family',
+      annualRent:26400,vacancyRate:5,propertyValue:365000,mortgageBalance:196000,
+      expenses:{mortgage:13200,propertyTax:2400,insurance:1200,maintenance:1500,management:0,hoa:1800,utilities:0,other:0}
+      // Gross: $25,080 · Expenses: $20,100 · NOI: $4,980 · Equity: $169,000
+    },
+    {
+      id:'srp_3',name:'Westside Condo',
+      annualRent:21600,vacancyRate:5,propertyValue:285000,mortgageBalance:175000,
+      expenses:{mortgage:8400,propertyTax:2000,insurance:900,maintenance:1200,management:0,hoa:2400,utilities:0,other:0}
+      // Gross: $20,520 · Expenses: $14,900 · NOI: $5,620 · Equity: $110,000
+    },
+  ]
+};
+
+function loadSampleData(silent=false){
+  S.accounts = SAMPLE_DATA.accounts.map(a=>({...a,positions:a.positions.map(p=>({...p}))}));
+  S.rentalProperties = SAMPLE_DATA.rentalProperties.map(p=>({...p,expenses:{...p.expenses}}));
+  S.isSampleData = true;
+  S.optimizerResult = null; S.plannerResult = null;
+  updateNavSession(); updateSampleBanner(); renderIngestion();
+  switchTab('allocation');
+  if(!silent) toast('📊 Sample portfolio loaded — explore every tab!');
+}
+
+function clearSampleData(){
+  S.accounts=[]; S.rentalProperties=[];
+  S.isSampleData=false;
+  S.optimizerResult=null; S.plannerResult=null;
+  updateSampleBanner();
+}
+
+function clearSampleAndReset(){
+  clearSampleData();
+  renderIngestion(); updateNavSession();
+  switchTab('ingestion');
+  toast('Sample data cleared — upload your own files to get started');
+}
+
+function updateSampleBanner(){
+  const el=document.getElementById('sample-banner');
+  if(el) el.style.display = S.isSampleData ? 'flex' : 'none';
+}
 let reviewQueue = [];
 let reviewIdx = 0;
 let procItems = []; // [{name, status, result}]
@@ -1744,6 +1971,8 @@ async function handleFileList(files) {
   // Filter to only supported file types
   const supported = files.filter(f=>/\.(csv|xlsx|xls|pdf)$/i.test(f.name));
   if(!supported.length){toast('No supported files found (CSV, XLSX, PDF)','err');return;}
+  // Clear sample data when user uploads their own files
+  if(S.isSampleData) clearSampleData();
 
   reviewQueue = [];
   reviewIdx = 0;
@@ -1895,6 +2124,8 @@ function confirmReview(){
   const item = reviewQueue[reviewIdx];
   const name = document.getElementById('rv-name').value.trim() || 'Unnamed Account';
   const tax  = document.getElementById('rv-tax').value;
+  // Clear sample data on first real account confirmation
+  if(S.isSampleData) clearSampleData();
   S.accounts.push({
     id:uid(), name, taxTreatment:tax,
     positions: item.positions,
@@ -2001,8 +2232,13 @@ function renderIngestion(){
   const txBadge={taxable:'badge-taxable','tax-deferred':'badge-deferred','tax-free':'badge-free'};
   const txLabel={taxable:'Taxable','tax-deferred':'Tax-Deferred','tax-free':'Tax-Free'};
   list.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-    <div style="font-weight:700;font-size:15px;">${S.accounts.length} Account${S.accounts.length!==1?'s':''} · ${fc(S.accounts.reduce((s,a)=>s+a.totalBalance,0))} Total</div>
-    <button class="btn btn-ghost btn-sm" onclick="clearAll()">🗑 Clear All</button>
+    <div style="font-weight:700;font-size:15px;">${S.accounts.length} Account${S.accounts.length!==1?'s':''} · ${fc(S.accounts.reduce((s,a)=>s+a.totalBalance,0))} Total
+      ${S.isSampleData?'<span style="background:#fef3c7;color:#92400e;border:1px solid #fcd34d;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;margin-left:8px;vertical-align:middle">SAMPLE</span>':''}
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      ${S.isSampleData?'<button class="btn btn-sm" onclick="clearSampleAndReset()" style="background:#f59e0b;color:#fff;border:none">📂 Use My Own Data</button>':''}
+      <button class="btn btn-ghost btn-sm" onclick="clearAll()">🗑 Clear All</button>
+    </div>
   </div>`
   + S.accounts.map(acc=>`
     <div class="acct-card">
@@ -2040,8 +2276,8 @@ function togglePos(id){
   el.classList.toggle('open');
   btn.textContent=el.classList.contains('open')?'▴':'▾';
 }
-function delAcct(id){S.accounts=S.accounts.filter(a=>a.id!==id);S.optimizerResult=null;S.plannerResult=null;renderIngestion();}
-function clearAll(){if(confirm('Remove all accounts?')){S.accounts=[];S.optimizerResult=null;S.plannerResult=null;renderIngestion();}}
+function delAcct(id){S.accounts=S.accounts.filter(a=>a.id!==id);if(!S.accounts.length)S.isSampleData=false;S.optimizerResult=null;S.plannerResult=null;updateSampleBanner();renderIngestion();}
+function clearAll(){if(confirm('Remove all accounts?')){S.accounts=[];S.isSampleData=false;S.optimizerResult=null;S.plannerResult=null;updateSampleBanner();renderIngestion();}}
 
 // ─────────────────────────────────────────────────────────────────────
 // RENDER: ALLOCATION
@@ -3417,6 +3653,8 @@ function addRentalProperty(){
   const propertyValue=parseFloat(document.getElementById('rp-propvalue').value)||0;
   const mortgageBalance=parseFloat(document.getElementById('rp-mortgagebal').value)||0;
   const prop={id:'rp_'+Date.now(),name,annualRent:rent*12,vacancyRate:parseFloat(document.getElementById('rp-vacancy').value)||0,propertyValue,mortgageBalance,expenses};
+  // Clear sample data when user adds their own rental property
+  if(S.isSampleData) clearSampleData();
   S.rentalProperties=[...(S.rentalProperties||[]),prop];
   if (S.sessionPin) {
     saveSession();
@@ -3456,6 +3694,7 @@ function emptyState(icon,title,sub){
 function init(){
   pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   renderIngestion();
+  updateSampleBanner();
   document.addEventListener('keydown',e=>{
     if(e.key==='Escape'&&reviewQueue.length) skipReview();
     if(e.key==='Escape'&&document.getElementById('pin-setup-bg')?.style.display==='flex') skipPinSetup();
@@ -3463,9 +3702,19 @@ function init(){
   // Check for existing encrypted session on load
   if (localStorage.getItem(_SKEY)) {
     showLockScreen();
+  } else {
+    // No saved session — auto-load sample portfolio so new visitors see a live demo immediately
+    loadSampleData(true);
   }
 }
 init();
 </script>
+<!-- LEGAL FOOTER -->
+<div style="background:#f1f5f9;border-top:1px solid #e2e8f0;padding:10px 24px;text-align:center;font-size:11px;color:#94a3b8;line-height:1.7;">
+  <strong style="color:#64748b">Educational Use Only</strong> — PortfolioPro does not provide financial, investment, tax, or legal advice and does not create any advisor-client relationship.
+  All projections, yield estimates, tax calculations, and trade suggestions are illustrative and based solely on data you enter. Actual outcomes will vary.
+  Tax estimates use simplified federal/state marginal rates and may not reflect your complete tax situation.
+  <strong style="color:#64748b">Consult a qualified financial advisor, CPA, or attorney before making any investment or tax decisions.</strong>
+</div>
 </body>
 </html>
